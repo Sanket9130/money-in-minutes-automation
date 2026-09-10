@@ -1,23 +1,57 @@
-const crypto = require('crypto');
+'use strict';
 
-const SOURCE_TYPES = new Set(['article', 'video', 'dataset', 'official', 'asset', 'other']);
+const crypto = require('crypto');
+const { TruthAnchorEngine, CLAIM_CATEGORIES } = require('./truth-anchor-engine');
+const { TruthAnchorRegistry } = require('./truth-anchor-providers');
+
+const SOURCE_TYPES = new Set(['article', 'video', 'dataset', 'official', 'asset', 'sec_filing', 'company_ir', 'other']);
 const SOURCE_STATUSES = new Set(['pending', 'verified', 'rejected']);
-const CLAIM_RISKS = new Set(['standard', 'high']);
-const CLAIM_STATUSES = new Set(['pending', 'supported', 'unsupported', 'waived']);
+const CLAIM_RISKS = new Set(['standard', 'low', 'medium', 'high', 'critical']);
+const CLAIM_STATUSES = new Set(['pending', 'supported', 'unsupported', 'waived', 'verified', 'conflicting', 'stale']);
 
 class ProvenanceService {
-  constructor(db) {
+  constructor(db, options = {}) {
     this.db = db;
+    this.truthRegistry = options.truthRegistry || new TruthAnchorRegistry();
   }
 
   async initialize(productionId, production = {}) {
     const existing = await this.db.getContentProvenance(productionId);
     if (existing) return existing;
 
-    const sources = this.normalizeSources(production.strategy?.researchSources || []);
+    const sources = this.normalizeSources(
+      production.strategy?.researchSources || production.research?.sources || []
+    );
     const sourceIdByUrl = new Map(sources.map(source => [source.url, source.id]));
-    const claims = this.normalizeClaims(production.script?.claims || [], sources, sourceIdByUrl);
-    const provenance = this.build({ sources, claims, containsSyntheticMedia: production.containsSyntheticMedia === true });
+
+    // Extract claims from script or pre-declared claims
+    const inputClaims = Array.isArray(production.script?.claims) && production.script.claims.length > 0
+      ? production.script.claims
+      : TruthAnchorEngine.extractClaims(production.script || {});
+
+    // Automatically cross-reference and verify claims against attached sources and providers
+    const verifiedResults = await this.truthRegistry.verifyAllClaims(inputClaims, sources);
+
+    const enrichedClaims = verifiedResults.map(item => {
+      const claimSourceIds = [...(item.sourceIds || [])];
+      if (item.evidence?.url && sourceIdByUrl.has(item.evidence.url)) {
+        claimSourceIds.push(sourceIdByUrl.get(item.evidence.url));
+      }
+      return {
+        ...item,
+        sourceIds: [...new Set(claimSourceIds)],
+        status: (item.verificationStatus === 'verified' && claimSourceIds.some(id => sources.some(s => s.id === id && s.status === 'verified')))
+          ? 'supported'
+          : (item.status || 'pending')
+      };
+    });
+
+    const claims = this.normalizeClaims(enrichedClaims, sources, sourceIdByUrl);
+    const provenance = this.build({
+      sources,
+      claims,
+      containsSyntheticMedia: production.containsSyntheticMedia === true
+    });
     await this.db.saveContentProvenance(productionId, provenance);
     return this.db.getContentProvenance(productionId);
   }
@@ -41,6 +75,9 @@ class ProvenanceService {
     for (const claim of claims) {
       claim.sourceIds = claim.sourceIds.filter(id => sourceIds.has(id));
       if (claim.status === 'supported') {
+        if (claim.hasConflict || claim.status === 'conflicting' || claim.verificationStatus === 'conflicting') {
+          throw this.invalid('A claim with conflicting evidence across sources cannot be supported without resolving or waiving the conflict');
+        }
         const hasVerifiedSource = claim.sourceIds.some(id =>
           sources.some(source => source.id === id && source.status === 'verified')
         );
@@ -52,9 +89,15 @@ class ProvenanceService {
     }
 
     const unresolvedClaims = claims.filter(claim => !['supported', 'waived'].includes(claim.status));
+    const conflictingClaims = claims.filter(claim => claim.status === 'conflicting' || claim.verificationStatus === 'conflicting');
+    const staleClaims = claims.filter(claim => claim.status === 'stale' || claim.verificationStatus === 'stale');
+
+    // A bundle is blocked if any claims are unresolved, conflicting, or stale
     const status = claims.length === 0
       ? 'not_required'
-      : unresolvedClaims.length === 0 ? 'verified' : 'blocked';
+      : (unresolvedClaims.length === 0 && conflictingClaims.length === 0 && staleClaims.length === 0)
+        ? 'verified'
+        : 'blocked';
 
     return {
       sources,
@@ -67,7 +110,11 @@ class ProvenanceService {
         verifiedSources: sources.filter(source => source.status === 'verified').length,
         claimCount: claims.length,
         resolvedClaims: claims.length - unresolvedClaims.length,
-        highRiskClaims: claims.filter(claim => claim.riskLevel === 'high').length,
+        highRiskClaims: claims.filter(claim => ['high', 'critical'].includes(claim.riskLevel)).length,
+        criticalClaims: claims.filter(claim => claim.riskLevel === 'critical').length,
+        financialClaims: claims.filter(claim => claim.category === 'financial').length,
+        conflictingClaims: conflictingClaims.length,
+        staleClaims: staleClaims.length,
         unresolvedClaims: unresolvedClaims.length
       }
     };
@@ -108,12 +155,29 @@ class ProvenanceService {
         ...(Array.isArray(item?.sourceIds) ? item.sourceIds : []),
         ...mappedUrls
       ].map(value => String(value)).filter(id => validSourceIds.has(id)))];
+
+      const category = CLAIM_CATEGORIES.has(item?.category)
+        ? item.category
+        : TruthAnchorEngine.classifyClaim(text);
+
+      const riskLevel = CLAIM_RISKS.has(item?.riskLevel)
+        ? item.riskLevel
+        : TruthAnchorEngine.assignRiskLevel(category, text);
+
       return {
         id: this.id(item?.id, 'claim'),
         text,
-        riskLevel: CLAIM_RISKS.has(item?.riskLevel) ? item.riskLevel : 'standard',
+        category,
+        riskLevel,
+        normalizedData: item?.normalizedData || TruthAnchorEngine.extractNumericData(text),
         sourceIds,
         status: CLAIM_STATUSES.has(item?.status) ? item.status : 'pending',
+        verificationStatus: item?.verificationStatus || (item?.status === 'supported' ? 'verified' : 'unverified'),
+        hasConflict: item?.hasConflict === true || item?.status === 'conflicting' || item?.verificationStatus === 'conflicting',
+        conflictDetails: item?.conflictDetails || item?.conflict?.details || null,
+        freshness: item?.freshness || null,
+        conflict: item?.conflict || null,
+        evidence: item?.evidence || null,
         notes: this.text(item?.notes, 1000)
       };
     });
@@ -151,4 +215,10 @@ class ProvenanceService {
   }
 }
 
-module.exports = { ProvenanceService };
+module.exports = {
+  ProvenanceService,
+  SOURCE_TYPES,
+  SOURCE_STATUSES,
+  CLAIM_RISKS,
+  CLAIM_STATUSES
+};

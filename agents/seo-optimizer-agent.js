@@ -27,7 +27,7 @@ class SEOOptimizerAgent {
     }
   }
 
-  async optimize(script, strategy) {
+  async optimize(script, strategy, options = {}) {
     try {
       this.logger.info(`Optimizing SEO for: ${script.title}`);
       
@@ -46,6 +46,15 @@ class SEOOptimizerAgent {
         
         // Extract and optimize tags
         tags = await this.generateTags(script, strategy);
+      }
+
+      // Append citations and financial disclaimers if provenance data exists
+      const provenance = strategy?.provenance || options.provenance || script?.provenance;
+      if (provenance) {
+        const citations = this.formatCitationsAndDisclaimer(provenance, options);
+        if (citations && (description.length + citations.length) <= 5000) {
+          description = `${description}${citations}`;
+        }
       }
       
       // Generate hashtags
@@ -453,11 +462,13 @@ Keep tags under YouTube's 500 character total guidance. Avoid fabricated statist
     const hashtags = [];
     
     // Primary hashtag
-    const primaryHashtag = `#${strategy.topic.replace(/\s+/g, '')}`;
+    const topic = String(strategy.topic || strategy.title || strategy.keywords?.[0] || 'video').trim();
+    const primaryHashtag = `#${topic.replace(/\s+/g, '')}`;
     hashtags.push(primaryHashtag);
     
     // Content type hashtag
-    hashtags.push(`#${strategy.contentType.toLowerCase()}`);
+    const contentType = String(strategy.contentType || 'video').toLowerCase();
+    hashtags.push(`#${contentType}`);
     
     // Trending hashtags
     const trendingHashtags = [
@@ -618,6 +629,37 @@ Keep tags under YouTube's 500 character total guidance. Avoid fabricated statist
     
     const niche = this.identifyNiche(strategy);
     return categories[niche] || 22; // Default to People & Blogs
+  }
+
+  /**
+   * Formats verified sources and optional disclaimers for video descriptions.
+   */
+  formatCitationsAndDisclaimer(provenance = {}, options = {}) {
+    const sources = Array.isArray(provenance.sources) ? provenance.sources : [];
+    const claims = Array.isArray(provenance.claims) ? provenance.claims : [];
+    const verifiedSources = sources.filter(s => s.status === 'verified' || s.url);
+    const hasFinancialClaims = claims.some(c => c.category === 'financial');
+
+    if (verifiedSources.length === 0 && !hasFinancialClaims) {
+      return '';
+    }
+
+    const lines = ['\n\n📌 Sources & References:'];
+    const seenUrls = new Set();
+
+    for (const source of verifiedSources) {
+      if (!source.url || seenUrls.has(source.url)) continue;
+      seenUrls.add(source.url);
+      const title = source.title || source.publisher || 'Reference Source';
+      const publisher = source.publisher && source.publisher !== title ? ` (${source.publisher})` : '';
+      lines.push(`• ${title}${publisher}: ${source.url}`);
+    }
+
+    if (hasFinancialClaims || options.includeFinancialDisclaimer === true) {
+      lines.push('\n⚠️ Disclaimer: Financial and market figures are compiled from public regulatory filings and verified sources. Not financial advice.');
+    }
+
+    return lines.join('\n');
   }
 }
 

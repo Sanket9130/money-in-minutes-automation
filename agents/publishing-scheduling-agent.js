@@ -116,7 +116,14 @@ class PublishingSchedulingAgent {
       if (this.db.getProductionBundle) {
         productionBundle = await this.db.getProductionBundle(contentId);
         if (productionBundle && !['verified', 'not_required'].includes(productionBundle.provenance?.status || 'not_required')) {
-          const error = new Error('Publishing is blocked until every factual claim is supported or explicitly waived');
+          const summary = productionBundle.provenance?.summary;
+          let message = 'Publishing is blocked until every factual claim is supported or explicitly waived';
+          if (summary?.conflictingClaims > 0) {
+            message = `Publishing is blocked: ${summary.conflictingClaims} claim(s) have conflicting data across sources`;
+          } else if (summary?.staleClaims > 0) {
+            message = `Publishing is blocked: ${summary.staleClaims} claim(s) exceed the allowable freshness window`;
+          }
+          const error = new Error(message);
           error.status = 409;
           error.code = 'PROVENANCE_BLOCKED';
           throw error;

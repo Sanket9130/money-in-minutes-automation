@@ -49,6 +49,7 @@ class SystemTest {
       { name: 'Native 9:16 Shorts Canvas Compositor', test: () => this.testNativeShortsCanvasCompositor() },
       { name: 'Dynamic Karaoke Captions for Shorts', test: () => this.testDynamicKaraokeCaptions() },
       { name: 'First 2-Second Anti-Swipe Visual Hook', test: () => this.testAntiSwipeVisualHook() },
+      { name: 'Financial Data Truth-Anchor', test: () => this.testFinancialDataTruthAnchor() },
       { name: 'Evergreen Template Topics', test: () => this.testEvergreenTopics() },
       { name: 'Walkthrough Module', test: () => this.testWalkthroughModule() },
       { name: 'Logger System', test: () => this.testLogger() },
@@ -2962,6 +2963,315 @@ class SystemTest {
     }
 
     this.logger.info('First 2-Second Anti-Swipe Visual Hook test completed successfully');
+  }
+
+  async testFinancialDataTruthAnchor() {
+    const { TruthAnchorEngine, CLAIM_CATEGORIES, CLAIM_RISKS } = require('./utils/truth-anchor-engine');
+    const {
+      TruthAnchorRegistry,
+      MockTruthProvider,
+      SourceSnippetAdapter,
+      SecEdgarAdapter,
+      PublicMarketQuoteAdapter
+    } = require('./utils/truth-anchor-providers');
+    const { ProvenanceService } = require('./utils/provenance-service');
+    const { PublishingSchedulingAgent } = require('./agents/publishing-scheduling-agent');
+    const { SEOOptimizerAgent } = require('./agents/seo-optimizer-agent');
+    const { Database } = require('./database/db');
+    const fs = require('fs').promises;
+    const path = require('path');
+    const os = require('os');
+
+    const testScript = {
+      title: 'How Apple Makes $400 Billion in Revenue',
+      hook: { text: 'Apple generated $400B in revenue and holds a $3.2T market cap.' },
+      mainContent: {
+        sections: [
+          {
+            title: 'Store Network',
+            content: 'The company currently operates 500 stores worldwide across 26 countries.'
+          },
+          {
+            title: 'Revenue Engine',
+            content: 'Services grew 15% year-over-year in recurring revenue streams.'
+          },
+          {
+            title: 'Opinion and Commentary',
+            content: 'In my view, this is the most remarkable business story of our generation.'
+          }
+        ]
+      }
+    };
+
+    const extracted = TruthAnchorEngine.extractClaims(testScript);
+    if (!Array.isArray(extracted) || extracted.length === 0) {
+      throw new Error('TruthAnchorEngine failed to extract claims from structured script');
+    }
+
+    // Must find numerical/financial claims
+    const revenueClaim = extracted.find(c => c.text.includes('$400B'));
+    if (!revenueClaim) {
+      throw new Error('Failed to extract $400B revenue claim');
+    }
+    if (revenueClaim.category !== CLAIM_CATEGORIES.FINANCIAL) {
+      throw new Error(`Expected category "financial" for $400B claim, got "${revenueClaim.category}"`);
+    }
+    if (revenueClaim.parsedValue?.numeric !== 400000000000) {
+      throw new Error(`Expected parsed numerical value 400,000,000,000, got ${revenueClaim.parsedValue?.numeric}`);
+    }
+
+    const growthClaim = extracted.find(c => c.text.includes('15%'));
+    if (!growthClaim) {
+      throw new Error('Failed to extract 15% growth rate claim');
+    }
+    if (growthClaim.parsedValue?.numeric !== 15 || growthClaim.parsedValue?.type !== 'percentage') {
+      throw new Error(`Expected percentage metric of 15, got ${JSON.stringify(growthClaim.parsedValue)}`);
+    }
+
+    const countClaim = extracted.find(c => c.text.includes('500 stores'));
+    if (!countClaim) {
+      throw new Error('Failed to extract 500 stores count claim');
+    }
+    if (countClaim.category !== CLAIM_CATEGORIES.NUMERICAL && countClaim.category !== CLAIM_CATEGORIES.BUSINESS) {
+      throw new Error(`Expected numerical/business category for 500 stores, got "${countClaim.category}"`);
+    }
+
+    // Opinion commentary classification
+    const opinionClaim = extracted.find(c => c.text.includes('most remarkable business story'));
+    if (opinionClaim && opinionClaim.category !== CLAIM_CATEGORIES.OPINION_COMMENTARY) {
+      throw new Error(`Expected opinion commentary to be classified as OPINION_COMMENTARY, got ${opinionClaim.category}`);
+    }
+
+    // 2. Risk Level Assignment
+    if (revenueClaim.riskLevel !== CLAIM_RISKS.CRITICAL && revenueClaim.riskLevel !== CLAIM_RISKS.HIGH) {
+      throw new Error(`Expected high/critical risk for multi-billion revenue claim, got ${revenueClaim.riskLevel}`);
+    }
+
+    // 3. Freshness Policy Evaluation
+    const now = new Date();
+    const freshRealtimeDate = new Date(now.getTime() - 2 * 3600 * 1000).toISOString(); // 2 hours ago
+    const staleRealtimeDate = new Date(now.getTime() - 48 * 3600 * 1000).toISOString(); // 2 days ago (>1d)
+    const freshQuarterlyDate = new Date(now.getTime() - 30 * 86400 * 1000).toISOString(); // 30 days ago
+    const staleQuarterlyDate = new Date(now.getTime() - 150 * 86400 * 1000).toISOString(); // 150 days ago (>105d)
+
+    const freshEval = TruthAnchorEngine.evaluateFreshness('realtime_quote', freshRealtimeDate);
+    if (!freshEval.isFresh) {
+      throw new Error('2-hour-old quote was incorrectly marked as stale for realtime_quote');
+    }
+    const staleEval = TruthAnchorEngine.evaluateFreshness('realtime_quote', staleRealtimeDate);
+    if (staleEval.isFresh) {
+      throw new Error('48-hour-old quote was incorrectly marked as fresh for realtime_quote');
+    }
+    const qFreshEval = TruthAnchorEngine.evaluateFreshness('quarterly_financials', freshQuarterlyDate);
+    if (!qFreshEval.isFresh) {
+      throw new Error('30-day-old quarterly metric was incorrectly marked as stale');
+    }
+    const qStaleEval = TruthAnchorEngine.evaluateFreshness('quarterly_financials', staleQuarterlyDate);
+    if (qStaleEval.isFresh) {
+      throw new Error('150-day-old quarterly metric was incorrectly marked as fresh');
+    }
+
+    // 4. Corroboration & Conflict Variance Detection (>2% Threshold)
+    const consistentSources = [
+      { url: 'https://sec.gov/edgar/1', publisher: 'SEC EDGAR', extractedValue: 400000000000 },
+      { url: 'https://finance.yahoo.com/quote/AAPL', publisher: 'Yahoo Finance', extractedValue: 402000000000 }
+    ]; // Variance: (402-400)/400 = 0.5% (< 2%)
+    const consistentResult = TruthAnchorEngine.checkCorroboration(400000000000, consistentSources);
+    if (consistentResult.hasConflict || !consistentResult.corroborated) {
+      throw new Error(`0.5% variance between sources was incorrectly flagged as conflicting: ${JSON.stringify(consistentResult)}`);
+    }
+
+    const conflictingSources = [
+      { url: 'https://sec.gov/edgar/1', publisher: 'SEC EDGAR', extractedValue: 400000000000 },
+      { url: 'https://blog.example.com/aapl', publisher: 'Tech Blog', extractedValue: 450000000000 }
+    ]; // Variance: (450-400)/400 = 12.5% (> 2%)
+    const conflictingResult = TruthAnchorEngine.checkCorroboration(400000000000, conflictingSources);
+    if (!conflictingResult.hasConflict) {
+      throw new Error('12.5% discrepancy between sources failed to trigger hasConflict = true');
+    }
+    if (conflictingResult.variance <= 0.02) {
+      throw new Error(`Calculated variance ${conflictingResult.variance} should exceed 2%`);
+    }
+
+    // 5. Providers & Registry Functionality (Zero Mandatory Paid APIs)
+    const registry = new TruthAnchorRegistry();
+    const mockProvider = new MockTruthProvider();
+    mockProvider.registerFact('$400B', {
+      verified: true,
+      corroborated: true,
+      hasConflict: false,
+      value: 400000000000,
+      asOfDate: freshQuarterlyDate,
+      claimType: 'quarterly_financials',
+      sources: [{ url: 'https://sec.gov/edgar/mock', publisher: 'SEC EDGAR' }]
+    });
+    mockProvider.registerFact('500 stores', {
+      verified: true,
+      corroborated: false,
+      hasConflict: true,
+      variance: 0.15,
+      conflictDetails: 'Source A reports 500 stores, Source B reports 575 stores',
+      sources: [
+        { url: 'https://example.com/sourceA', publisher: 'Source A', extractedValue: 500 },
+        { url: 'https://example.com/sourceB', publisher: 'Source B', extractedValue: 575 }
+      ]
+    });
+    registry.register(mockProvider);
+
+    const verifiedCheck = await registry.verifyClaim(revenueClaim);
+    if (!verifiedCheck.verified || verifiedCheck.hasConflict) {
+      throw new Error('MockTruthProvider failed to verify corroborated revenue claim');
+    }
+
+    const conflictCheck = await registry.verifyClaim(countClaim);
+    if (!conflictCheck.hasConflict) {
+      throw new Error('Registry failed to detect conflicting claim from mock provider');
+    }
+
+    // Adapter instances exist without mandatory external network requirements
+    const edgar = new SecEdgarAdapter();
+    const publicQuote = new PublicMarketQuoteAdapter();
+    const snippetAdapter = new SourceSnippetAdapter();
+    if (!edgar.name || !publicQuote.name || !snippetAdapter.name) {
+      throw new Error('Free/open truth anchor adapters missing required adapter metadata');
+    }
+
+    // 6. ProvenanceService & Publishing Gate Integration with Conflicting/Stale Claims
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'yaa-truth-anchor-'));
+    const db = new Database();
+    db.dbPath = path.join(directory, 'truth_anchor.db');
+    await db.initialize();
+
+    try {
+      const prodId = 'prod_truth_anchor_test';
+      await fs.writeFile(path.join(directory, 'audio.mp3'), Buffer.from('test-audio'));
+      await db.saveProductionData({
+        id: prodId,
+        status: 'needs_review',
+        assets: {
+          audio: { path: path.join(directory, 'audio.mp3'), status: 'ready', simulated: false }
+        },
+        timeline: {},
+        scheduledPublishTime: new Date(Date.now() + 86400000).toISOString(),
+        priority: 50,
+        estimatedDuration: '1:00'
+      });
+      const production = {
+        id: prodId,
+        strategy: {
+          topic: 'Apple Revenue Anatomy',
+          researchSources: [
+            { url: 'https://sec.gov/edgar/aapl', title: 'Apple 10-K Filing', publisher: 'SEC EDGAR', sourceType: 'official', publishedAt: freshQuarterlyDate }
+          ]
+        },
+        script: testScript,
+        seo: {
+          title: 'Apple $400B Revenue Explained',
+          description: 'Deep dive into Apple revenue breakdown and growth.',
+          tags: ['apple', 'revenue', 'finance']
+        },
+        assets: {
+          audio: { path: path.join(directory, 'audio.mp3'), status: 'ready' }
+        }
+      };
+      await db.saveProductionSnapshot(production);
+
+      const provenanceService = new ProvenanceService(db);
+      const initialized = await provenanceService.initialize(prodId, production);
+
+      if (initialized.status !== 'blocked') {
+        throw new Error('Production with unverified financial claims was not initialized as blocked');
+      }
+      if (!initialized.summary || initialized.summary.totalClaims === 0) {
+        throw new Error('Provenance initialization did not populate truth-anchor summary');
+      }
+
+      // Test publishing gate block with detailed error code
+      const publishAgent = new PublishingSchedulingAgent(db, {});
+      publishAgent.publishQueue = [{ productionId: prodId, status: 'scheduled', metadata: {} }];
+
+      let blockedError = null;
+      try {
+        await publishAgent.publishContent(prodId);
+      } catch (err) {
+        blockedError = err;
+      }
+      if (!blockedError || blockedError.code !== 'PROVENANCE_BLOCKED') {
+        throw new Error(`Expected PROVENANCE_BLOCKED from publishing gate, got ${blockedError?.code}`);
+      }
+
+      // Review and verify with valid corroborating sources
+      const reviewed = await provenanceService.review(prodId, {
+        sources: initialized.sources.map(s => ({ ...s, status: 'verified' })),
+        claims: initialized.claims.map(c => ({
+          ...c,
+          status: 'supported',
+          sourceIds: initialized.sources.map(s => s.id)
+        })),
+        containsSyntheticMedia: false
+      });
+
+      if (reviewed.status !== 'verified' || reviewed.summary.unresolvedClaims !== 0) {
+        throw new Error('ProvenanceService review did not resolve all claims to verified status');
+      }
+
+      // Test conflicting claim review handling: simulating a conflicting claim blocks approval
+      let conflictingApprovalFailed = false;
+      try {
+        await provenanceService.review(prodId, {
+          sources: reviewed.sources,
+          claims: [
+            {
+              ...reviewed.claims[0],
+              status: 'supported',
+              hasConflict: true,
+              conflictDetails: 'Source conflict > 2% variance'
+            }
+          ]
+        });
+      } catch (err) {
+        conflictingApprovalFailed = /conflicting/i.test(err.message);
+      }
+      if (!conflictingApprovalFailed) {
+        throw new Error('Provenance review allowed supporting a claim with an unresolved data conflict');
+      }
+
+      // 7. SEOOptimizerAgent Formats Citations & Disclaimer
+      const seoAgent = new SEOOptimizerAgent(db, {});
+      const strategy = {
+        topic: 'Apple revenue',
+        keywords: ['Apple revenue', 'finance'],
+        angle: 'how Apple generates $400B in revenue',
+        provenance: reviewed,
+        contentType: 'short'
+      };
+      const enrichedSeo = await seoAgent.optimize(testScript, strategy);
+
+      if (!enrichedSeo.description.includes('Sources & References:') && !enrichedSeo.description.includes('SEC EDGAR')) {
+        throw new Error('SEO description did not format verified sources and citations');
+      }
+      if (!enrichedSeo.description.includes('Not financial advice')) {
+        throw new Error('SEO description missing mandatory financial disclaimer');
+      }
+
+      // 8. 16:9 Non-Financial Script Clean Regression
+      const nonFinancialScript = {
+        title: 'How to Build a Morning Routine',
+        hook: { text: 'Wake up early and drink a glass of water.' },
+        mainContent: { sections: [{ title: 'Hydration', content: 'Water kickstarts your metabolism.' }] }
+      };
+      const cleanClaims = TruthAnchorEngine.extractClaims(nonFinancialScript);
+      const cleanFinancials = cleanClaims.filter(c => c.category === CLAIM_CATEGORIES.FINANCIAL);
+      if (cleanFinancials.length !== 0) {
+        throw new Error('Non-financial script falsely generated financial claims');
+      }
+
+    } finally {
+      await db.close();
+      await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.logger.info('Financial Data Truth-Anchor test completed successfully');
   }
 
   async testEvergreenTopics() {
