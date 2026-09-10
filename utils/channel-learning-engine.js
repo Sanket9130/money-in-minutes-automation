@@ -1,17 +1,19 @@
 const crypto = require('crypto');
 const { Logger } = require('./logger');
 const { SceneRetentionEngine } = require('./scene-retention-engine');
+const { ContentDNAService } = require('./content-dna-service');
 
 class ChannelLearningEngine {
-  constructor(db) {
+  constructor(db, options = {}) {
     this.db = db;
     this.logger = new Logger('ChannelLearning');
     this.sceneRetention = new SceneRetentionEngine(db);
+    this.dnaService = options.dnaService || new ContentDNAService(options.dnaOptions || {});
   }
 
   async capture(performanceReport, context = {}, measurementWindow = 'rolling') {
     const metrics = this.normalizeMetrics(performanceReport, context);
-    const attributes = this.extractAttributes(performanceReport, context);
+    const attributes = this.extractAttributes(performanceReport, context, metrics);
     const prior = (await this.db.listPerformanceSnapshots({
       measurementWindow,
       reliableOnly: true,
@@ -96,12 +98,17 @@ class ChannelLearningEngine {
     };
   }
 
-  extractAttributes(report, context) {
+  extractAttributes(report, context, metrics = null) {
     const strategy = context.strategy || {};
     const script = context.script || {};
     const thumbnail = context.thumbnail || {};
     const title = report.videoDetails?.title || context.title || script.title || '';
     const hook = this.text(script.hook || script.introduction || '');
+    const activeMetrics = metrics || report?.analytics || report?.metrics || context?.metrics || {};
+
+    // Delegate Content DNA pattern extraction to ContentDNAService
+    const contentDNA = this.dnaService.extractContentDNA({ ...context, title }, activeMetrics);
+
     return {
       topic: strategy.topic || '',
       pillar: strategy.contentPillar || strategy.pillar || 'unknown',
@@ -110,14 +117,43 @@ class ChannelLearningEngine {
         ? 'shorts'
         : this.slug(strategy.requestedStyle || strategy.contentType || 'unknown'),
       length: this.slug(strategy.requestedLengthKey || strategy.requestedLength || 'unknown'),
-      hookLength: hook ? (this.wordCount(hook) <= 40 ? 'concise' : 'extended') : 'unknown',
+      hookLength: contentDNA.hookPattern?.hookLength || (hook ? (this.wordCount(hook) <= 40 ? 'concise' : 'extended') : 'unknown'),
       titleLength: title ? (this.wordCount(title) <= 9 ? 'concise' : 'long') : 'unknown',
       thumbnailStyle: this.slug(
         thumbnail.concept?.composition || thumbnail.concept?.style || thumbnail.style || 'unknown'
       ),
       provider: context.productionCost?.providers?.length === 1 ? this.slug(context.productionCost.providers[0]) : 'mixed_or_unknown',
-      source: strategy.planRationale ? 'autonomous_operator' : 'manual'
+      source: strategy.planRationale ? 'autonomous_operator' : 'manual',
+      contentDNA
     };
+  }
+
+  extractContentDNA(context, metrics) {
+    return this.dnaService.extractContentDNA(context, metrics);
+  }
+
+  getContentDNAProfile(snapshots = null) {
+    if (!snapshots || !Array.isArray(snapshots) || !snapshots.length) {
+      return this.dnaService.emptyAggregatedProfile();
+    }
+    const samples = snapshots
+      .map(s => {
+        if (!s) return null;
+        if (s.contentAttributes?.contentDNA) return s.contentAttributes.contentDNA;
+        if (s.content_attributes) {
+          try {
+            const parsed = typeof s.content_attributes === 'string'
+              ? JSON.parse(s.content_attributes)
+              : s.content_attributes;
+            return parsed?.contentDNA || null;
+          } catch (_e) {
+            return null;
+          }
+        }
+        return null;
+      })
+      .filter(Boolean);
+    return this.dnaService.aggregateDNA(samples);
   }
 
   calculateBaseline(snapshots) {
@@ -320,7 +356,8 @@ class ChannelLearningEngine {
         longFormCount: retentionSnapshots.filter(item => item.surface === 'long_form').length,
         shortsCount: retentionSnapshots.filter(item => item.surface === 'shorts').length,
         snapshots: retentionSnapshots
-      }
+      },
+      contentDNA: this.getContentDNAProfile(preferred)
     };
   }
 

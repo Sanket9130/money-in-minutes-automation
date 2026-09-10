@@ -88,7 +88,8 @@ class SystemTest {
       { name: 'Professional Audio Enhancement Engine', test: () => this.testAudioEnhancementEngine() },
       { name: 'Shorts Packaging & Publishing Pipeline', test: () => this.testShortsPackagingAndPublishingPipeline() },
       { name: 'Semantic Topic Deduplication Service', test: () => this.testSemanticDedupService() },
-      { name: 'Trending Topic Discovery Service', test: () => this.testTrendingTopicDiscovery() }
+      { name: 'Trending Topic Discovery Service', test: () => this.testTrendingTopicDiscovery() },
+      { name: 'Content DNA Pattern Extraction & Aggregation Service', test: () => this.testContentDNAService() }
     ];
 
     let passed = 0;
@@ -4881,6 +4882,251 @@ class SystemTest {
     }
 
     this.logger.info('Trending Topic Discovery Service test completed successfully');
+  }
+
+  async testContentDNAService() {
+    this.logger.info('Starting Content DNA Service tests...');
+
+    const { ContentDNAService, TRUTH_ANCHOR_BOUNDARY, CONTENT_DNA_SCHEMA } = require('./utils/content-dna-service');
+    const { ChannelLearningEngine } = require('./utils/channel-learning-engine');
+    const { ContentStrategyAgent } = require('./agents/content-strategy-agent');
+    const { SemanticDedupService } = require('./utils/semantic-dedup-service');
+
+    // 1. ContentDNAService instantiation
+    const dnaService = new ContentDNAService();
+    if (!dnaService || typeof dnaService.extractContentDNA !== 'function') {
+      throw new Error('ContentDNAService failed to instantiate');
+    }
+
+    // 2. Schema availability
+    const schema = dnaService.getSchema();
+    if (!schema || schema.version !== '1.0.0' || !schema.properties.hookPattern || !schema.properties.pacingPattern) {
+      throw new Error('ContentDNAService schema is missing or invalid');
+    }
+    if (schema !== CONTENT_DNA_SCHEMA) {
+      throw new Error('getSchema() does not return the canonical schema');
+    }
+
+    // 3. Basic DNA extraction & validation
+    const basicSampleContext = {
+      contentFormat: 'short',
+      strategy: { topic: 'Compound Interest Secrets', contentPillar: 'Investing', requestedStyle: 'tutorial' },
+      script: {
+        title: 'Compound Interest Secrets',
+        hook: { text: 'Have you ever wondered why the rich get richer?', duration: '0:00-0:05', type: 'question' },
+        sections: [
+          { label: 'Hook', duration: 5, scriptText: 'Have you ever wondered why the rich get richer?' },
+          { label: 'Rule of 72', duration: 15, scriptText: 'The rule of 72 shows how fast your money doubles.' },
+          { label: 'Action Step', duration: 10, scriptText: 'Start investing today.' }
+        ]
+      },
+      retentionDuration: 30,
+      captionsPath: '/data/shorts/captions.srt',
+      thumbnail: { concept: { composition: 'split_screen' } }
+    };
+    const basicMetrics = {
+      retention: 62.5,
+      ctr: 8.2,
+      engagementRate: 5.5,
+      performanceScore: 86,
+      impressions: 5000,
+      views: 650
+    };
+
+    const basicDNA = dnaService.extractContentDNA(basicSampleContext, basicMetrics);
+    const validation = dnaService.validateDNA(basicDNA);
+    if (!validation.valid) {
+      throw new Error(`Basic extracted DNA failed schema validation: ${validation.errors.join(', ')}`);
+    }
+    if (basicDNA.surface !== 'shorts' || basicDNA.confidence !== 'high' || !basicDNA.performanceSignals.isWinning) {
+      throw new Error(`Basic extracted DNA properties incorrect: ${JSON.stringify(basicDNA)}`);
+    }
+
+    // 4. Hook pattern extraction
+    const questionHook = dnaService.extractHookPattern({
+      script: { hook: { text: 'Did you know that 90% of millionaires invest in real estate?', type: 'statistic' } }
+    }, { retention: 55 });
+    if (questionHook.hookType !== 'statistic' || questionHook.hookLength !== 'concise' || questionHook.hookStrength !== 'high') {
+      throw new Error(`Hook pattern extraction failed: ${JSON.stringify(questionHook)}`);
+    }
+
+    const challengeHook = dnaService.extractHookPattern({
+      script: { hook: 'Everything you thought you knew about budgeting is a lie and will keep you broke.' }
+    });
+    if (challengeHook.hookType !== 'challenge' || challengeHook.hookLength !== 'concise') {
+      throw new Error(`Challenge hook classification failed: ${JSON.stringify(challengeHook)}`);
+    }
+
+    const extendedHookText = 'This is an excessively long opening hook narrative and introduction designed specifically to test the extended hook length classification branch when a creator spends way too many words setting up the topic before getting to the valuable payoff of the Short video.';
+    const extendedHook = dnaService.extractHookPattern({ script: { hook: extendedHookText } });
+    if (extendedHook.hookLength !== 'extended' || extendedHook.hookWordCount <= 40) {
+      throw new Error(`Extended hook classification failed: ${JSON.stringify(extendedHook)}`);
+    }
+
+    // 5. Pacing extraction
+    const fastShortContent = {
+      contentFormat: 'short',
+      retentionDuration: 20,
+      scenes: [
+        { label: 'Scene 1', duration: 3 },
+        { label: 'Scene 2', duration: 3 },
+        { label: 'Scene 3', duration: 4 },
+        { label: 'Scene 4', duration: 3 },
+        { label: 'Scene 5', duration: 3 },
+        { label: 'Scene 6', duration: 4 }
+      ]
+    };
+    const fastPacing = dnaService.extractPacingPattern(fastShortContent);
+    if (fastPacing.pacing !== 'fast' || fastPacing.sceneCount !== 6 || fastPacing.transitionFrequency <= 0) {
+      throw new Error(`Fast pacing extraction failed: ${JSON.stringify(fastPacing)}`);
+    }
+
+    // 6. Visual density extraction
+    const visualContent = {
+      scenes: [
+        { label: 'Scene 1', treatment: 'ANTI_SWIPE_HOOK', sceneType: 'HOOK' },
+        { label: 'Scene 2', treatment: 'ANIMATED_NUMBER', sceneType: 'STATISTIC' },
+        { label: 'Scene 3', treatment: 'TWO_SIDED_COMPARISON', sceneType: 'COMPARISON' },
+        { label: 'Scene 4', treatment: 'SUBTLE_MOTION', sceneType: 'GENERAL_INFORMATION' }
+      ],
+      thumbnail: { concept: { composition: 'centered_hero' } }
+    };
+    const visualPattern = dnaService.extractVisualDensityPattern(visualContent);
+    if (!visualPattern.hasChartsOrVisualizations || visualPattern.densityLevel !== 'high' || visualPattern.treatmentTypes.length !== 4) {
+      throw new Error(`Visual density extraction failed: ${JSON.stringify(visualPattern)}`);
+    }
+
+    // 7. Caption pattern extraction
+    const captionContent = {
+      contentFormat: 'short',
+      captionsPath: '/path/to/subtitles.srt',
+      script: { fullScript: 'Compound interest turns small monthly investments into life changing wealth over thirty years.' },
+      retentionDuration: 10
+    };
+    const captionPattern = dnaService.extractCaptionPattern(captionContent, {}, { totalDurationSeconds: 10 });
+    if (!captionPattern.hasCaptions || (captionPattern.captionDensity !== 'sparse' && captionPattern.captionDensity !== 'balanced')) {
+      throw new Error(`Caption pattern extraction failed: ${JSON.stringify(captionPattern)}`);
+    }
+
+    // 8. Topic pattern extraction
+    const topicContent = {
+      contentFormat: 'short',
+      strategy: { topic: 'Why Apple Switched to ARM', contentPillar: 'Tech Business', requestedStyle: 'case_study', angle: 'Supply Chain' }
+    };
+    const topicPattern = dnaService.extractTopicPattern(topicContent);
+    if (topicPattern.topic !== 'Why Apple Switched to ARM' || topicPattern.category !== 'Tech Business' || topicPattern.format !== 'shorts') {
+      throw new Error(`Topic pattern extraction failed: ${JSON.stringify(topicPattern)}`);
+    }
+
+    // 9. Aggregation of multiple samples
+    const sample1 = dnaService.extractContentDNA(basicSampleContext, basicMetrics);
+    const sample2 = dnaService.extractContentDNA({
+      ...basicSampleContext,
+      strategy: { topic: 'Index Funds Explained', contentPillar: 'Investing', requestedStyle: 'tutorial' },
+      script: { hook: { text: 'Stop picking individual stocks right now.', type: 'challenge' } }
+    }, { retention: 58, ctr: 7.0, performanceScore: 82, impressions: 3000, views: 400 });
+    const sample3 = dnaService.extractContentDNA({
+      ...basicSampleContext,
+      strategy: { topic: 'Credit Score Myths', contentPillar: 'Credit', requestedStyle: 'mythbuster' },
+      script: { hook: { text: 'Everything about your credit score is wrong.', type: 'challenge' } }
+    }, { retention: 32, ctr: 3.5, performanceScore: 50, impressions: 1500, views: 120 });
+
+    const aggregated = dnaService.aggregateDNA([sample1, sample2, sample3]);
+    if (aggregated.sampleCount !== 3 || aggregated.surfaceBreakdown.shorts !== 3) {
+      throw new Error(`Aggregation sample count or surface breakdown failed: ${JSON.stringify(aggregated)}`);
+    }
+    if (!aggregated.dominantHookPatterns || !aggregated.dominantPacingPatterns || !aggregated.dominantVisualPatterns) {
+      throw new Error('Aggregation missing dominant pattern sections');
+    }
+    if (aggregated.dominantHookPatterns.typeFrequencies.challenge !== 2) {
+      throw new Error(`Hook frequency calculation incorrect: ${JSON.stringify(aggregated.dominantHookPatterns)}`);
+    }
+
+    // 10. Deterministic aggregation
+    const aggregatedRun2 = dnaService.aggregateDNA([sample1, sample2, sample3]);
+    const scrub = obj => { const copy = { ...obj }; delete copy.aggregatedAt; return JSON.stringify(copy); };
+    if (scrub(aggregated) !== scrub(aggregatedRun2)) {
+      throw new Error('Aggregation is non-deterministic between identical runs');
+    }
+
+    // 11. Confidence calculation
+    const emptyConf = dnaService.calculateConfidence([]);
+    const lowConf = dnaService.calculateConfidence([sample1]);
+    const medConf = dnaService.calculateConfidence([sample1, sample2, sample3]);
+    if (emptyConf !== 'none' || lowConf !== 'low' || medConf !== 'medium') {
+      throw new Error(`Confidence calculations incorrect: empty=${emptyConf}, low=${lowConf}, med=${medConf}`);
+    }
+
+    // 12. Malformed / empty input handling
+    const emptyDNA = dnaService.extractContentDNA(null, null);
+    if (!emptyDNA || emptyDNA.version !== '1.0.0' || emptyDNA.confidence !== 'unverified') {
+      throw new Error('extractContentDNA did not handle null inputs safely');
+    }
+    const emptyAgg = dnaService.aggregateDNA([]);
+    if (emptyAgg.sampleCount !== 0 || emptyAgg.confidence !== 'none') {
+      throw new Error('aggregateDNA([]) did not return safe empty aggregated profile');
+    }
+    const invalidValidation = dnaService.validateDNA({ invalid: true });
+    if (invalidValidation.valid || !invalidValidation.errors.length) {
+      throw new Error('validateDNA failed to catch invalid object');
+    }
+
+    // 13. Preservation of existing ChannelLearningEngine behavior
+    const mockDb = {
+      listPerformanceSnapshots: async () => [],
+      listLearningRecommendations: async () => []
+    };
+    const learningEngine = new ChannelLearningEngine(mockDb);
+    if (!learningEngine.dnaService || typeof learningEngine.extractContentDNA !== 'function') {
+      throw new Error('ChannelLearningEngine did not wire dnaService properly');
+    }
+    const attrs = learningEngine.extractAttributes({ videoDetails: { title: 'Test Video' } }, basicSampleContext);
+    if (attrs.surface !== 'shorts' || attrs.format !== 'shorts' || attrs.hookLength !== 'concise' || !attrs.contentDNA) {
+      throw new Error(`ChannelLearningEngine extractAttributes failed compatibility: ${JSON.stringify(attrs)}`);
+    }
+    const engineProfile = learningEngine.getContentDNAProfile([]);
+    if (engineProfile.sampleCount !== 0 || engineProfile.confidence !== 'none') {
+      throw new Error('ChannelLearningEngine getContentDNAProfile failed fallback');
+    }
+
+    // 14. ContentStrategyAgent compatibility & Truth Anchor boundary
+    const strategyAgent = new ContentStrategyAgent(null, null);
+    if (!strategyAgent) {
+      throw new Error('ContentStrategyAgent failed to instantiate with Content DNA integration');
+    }
+    if (TRUTH_ANCHOR_BOUNDARY.isFactualVerification !== false) {
+      throw new Error('Truth Anchor boundary compromised: Content DNA must never claim to be factual verification');
+    }
+    if (basicDNA.truthAnchorBoundary !== TRUTH_ANCHOR_BOUNDARY.boundaryRule) {
+      throw new Error('Content DNA missing explicit Truth Anchor boundary declaration');
+    }
+
+    // 15. A1 compatibility (Semantic Deduplication alongside DNA topic patterns)
+    const dedupService = new SemanticDedupService();
+    const candidateA = { topic: 'Why Apple Ditched Intel', score: 10 };
+    const candidateB = { topic: 'The Reason Apple Switched From Intel to M-Series', score: 9 };
+    const filtered = dedupService.filterDuplicates([candidateA, candidateB], []);
+    if (filtered.unique.length !== 1 || filtered.duplicates.length !== 1) {
+      throw new Error('Semantic deduplication failed on Content DNA topic patterns');
+    }
+
+    // 16. Developer B protection
+    const { VisualTreatmentSelector, TREATMENTS } = require('./utils/visual-treatment-engine');
+    const { FinancialVisualization, VISUALIZATION_TYPES } = require('./utils/financial-visualization-engine');
+    const { AudioEnhancementEngine } = require('./utils/audio-enhancement-engine');
+    const { ShortsPackagingService } = require('./utils/shorts-packaging-service');
+
+    if (!VisualTreatmentSelector || !TREATMENTS.ANTI_SWIPE_HOOK) {
+      throw new Error('Developer B VisualTreatmentSelector or TREATMENTS was modified or missing');
+    }
+    if (!FinancialVisualization || !VISUALIZATION_TYPES.ANIMATED_METRIC) {
+      throw new Error('Developer B FinancialVisualization was modified or missing');
+    }
+    if (!AudioEnhancementEngine || !ShortsPackagingService) {
+      throw new Error('Developer B AudioEnhancementEngine or ShortsPackagingService was modified or missing');
+    }
+
+    this.logger.info('Content DNA Service test completed successfully');
   }
 }
 
