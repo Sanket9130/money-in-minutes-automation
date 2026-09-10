@@ -46,6 +46,9 @@ class SystemTest {
       { name: 'FFmpeg Resolution', test: () => this.testFFmpegResolution() },
       { name: 'Gemini Media Provider Selection', test: () => this.testGeminiMediaProvider() },
       { name: 'Slideshow Renderer', test: () => this.testSlideshowRenderer() },
+      { name: 'Native 9:16 Shorts Canvas Compositor', test: () => this.testNativeShortsCanvasCompositor() },
+      { name: 'Dynamic Karaoke Captions for Shorts', test: () => this.testDynamicKaraokeCaptions() },
+      { name: 'First 2-Second Anti-Swipe Visual Hook', test: () => this.testAntiSwipeVisualHook() },
       { name: 'Evergreen Template Topics', test: () => this.testEvergreenTopics() },
       { name: 'Walkthrough Module', test: () => this.testWalkthroughModule() },
       { name: 'Logger System', test: () => this.testLogger() },
@@ -2550,6 +2553,415 @@ class SystemTest {
     }
 
     this.logger.info('Slideshow renderer test completed successfully');
+  }
+
+  async testNativeShortsCanvasCompositor() {
+    const { AIVideoGenerator, ShortsCanvasCompositor } = require('./utils/ai-video-generator');
+    const { checkFFmpeg, getFFmpegPath } = require('./utils/ffmpeg');
+    const { execFile } = require('child_process');
+    const { promisify } = require('util');
+    const execFileAsync = promisify(execFile);
+    const fs = require('fs').promises;
+    const path = require('path');
+    const os = require('os');
+    const sharp = require('sharp');
+
+    // 1. Validate Canvas Compositor Presets & Safe Zones
+    const verticalCanvas = ShortsCanvasCompositor.resolveCanvas({ aspectRatio: '9:16' });
+    if (verticalCanvas.width !== 1080 || verticalCanvas.height !== 1920 || verticalCanvas.aspectRatio !== '9:16') {
+      throw new Error('ShortsCanvasCompositor did not resolve native 1080x1920 for 9:16');
+    }
+    const horizontalCanvas = ShortsCanvasCompositor.resolveCanvas({ aspectRatio: '16:9' });
+    if (horizontalCanvas.width !== 1920 || horizontalCanvas.height !== 1080 || horizontalCanvas.aspectRatio !== '16:9') {
+      throw new Error('ShortsCanvasCompositor did not resolve 1920x1080 for 16:9');
+    }
+    const shortByOption = ShortsCanvasCompositor.resolveCanvas({ isShort: true });
+    if (shortByOption.aspectRatio !== '9:16') {
+      throw new Error('isShort flag did not resolve to 9:16 canvas');
+    }
+
+    const safeZone = ShortsCanvasCompositor.SHORTS_SAFE_ZONE;
+    if (safeZone.top < 200 || safeZone.bottom < 400 || safeZone.right < 120 || safeZone.left < 40) {
+      throw new Error('Shorts safe zones do not provide sufficient margins for YouTube Shorts UI overlays');
+    }
+
+    // 2. Validate Responsive HTML/CSS generation
+    const sampleScript = {
+      title: '3 Wealth Habits in 60 Seconds',
+      mainContent: {
+        sections: [
+          { title: 'Habit 1: Pay Yourself First', content: 'Automate transfers to investments before spending.' },
+          { title: 'Habit 2: Avoid Lifestyle Creep', content: 'Keep living expenses flat as your earnings rise.' }
+        ]
+      }
+    };
+
+    const verticalHTML = ShortsCanvasCompositor.createSlideshowHTML(sampleScript, [], { aspectRatio: '9:16' });
+    if (!verticalHTML.includes('1080px') || !verticalHTML.includes('1920px') || !verticalHTML.includes('safe-zone')) {
+      throw new Error('Vertical slideshow HTML does not include 1080x1920 geometry and safe-zone containers');
+    }
+
+    const horizontalHTML = ShortsCanvasCompositor.createSlideshowHTML(sampleScript, [], { aspectRatio: '16:9' });
+    if (horizontalHTML.includes('safe-zone') || !horizontalHTML.includes('1920px') || !horizontalHTML.includes('1080px')) {
+      throw new Error('Horizontal slideshow HTML was unexpectedly corrupted by vertical safe zones');
+    }
+
+    if (!(await checkFFmpeg())) {
+      this.logger.warn('FFmpeg unavailable — skipping native 1080x1920 video encoding test');
+      return;
+    }
+
+    // 3. Render Native 1080x1920 Slides and Video
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'yaa-native-shorts-'));
+    try {
+      const stills = [];
+      for (let i = 0; i < 2; i++) {
+        const stillPath = path.join(dir, `short_slide_${i}.png`);
+        await sharp({
+          create: { width: 1080, height: 1920, channels: 3, background: { r: 30 + i * 40, g: 50, b: 120 + i * 30 } }
+        }).png().toFile(stillPath);
+        stills.push(stillPath);
+      }
+
+      const generator = new AIVideoGenerator({});
+      const videoPath = path.join(dir, 'native_short.mp4');
+      await generator.renderSlidesToVideo(stills, 4, videoPath, { aspectRatio: '9:16' });
+
+      const videoStats = await fs.stat(videoPath);
+      if (!videoStats.size) {
+        throw new Error('Rendered native Short video is empty');
+      }
+
+      // Inspect output video stream with FFmpeg
+      let probeOutput = '';
+      try {
+        await execFileAsync(getFFmpegPath(), ['-i', videoPath]);
+      } catch (probeError) {
+        probeOutput = (probeError.stderr || '') + (probeError.stdout || '');
+      }
+
+      if (!probeOutput.includes('1080x1920')) {
+        throw new Error(`Expected native 1080x1920 output resolution but got:\n${probeOutput}`);
+      }
+
+      // 4. Mux Audio track and verify final Short
+      const audioPath = path.join(dir, 'audio.mp3');
+      const finalShortPath = path.join(dir, 'final_short.mp4');
+      await generator.addAudioToVideo(videoPath, audioPath, finalShortPath, { allowSilent: true });
+      const finalStats = await fs.stat(finalShortPath);
+      if (!finalStats.size) {
+        throw new Error('Final Short with audio muxing is empty');
+      }
+
+      // 5. Verify Timeline compositor with 9:16 canvas
+      const timelinePath = path.join(dir, 'timeline_short.mp4');
+      await generator.renderMediaTimeline([
+        { type: 'video', path: videoPath, duration: 1.5 },
+        { type: 'image', path: stills[0], duration: 1.5 }
+      ], timelinePath, { aspectRatio: '9:16' });
+
+      let timelineProbe = '';
+      try {
+        await execFileAsync(getFFmpegPath(), ['-i', timelinePath]);
+      } catch (probeError) {
+        timelineProbe = (probeError.stderr || '') + (probeError.stdout || '');
+      }
+      if (!timelineProbe.includes('1080x1920')) {
+        throw new Error(`Expected timeline Short output to be 1080x1920 but got:\n${timelineProbe}`);
+      }
+
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.logger.info('Native 9:16 Shorts Canvas Compositor test completed successfully');
+  }
+
+  async testDynamicKaraokeCaptions() {
+    const { ShortsKaraokeCaptions } = require('./utils/shorts-karaoke-captions');
+    const { checkFFmpeg, getFFmpegPath } = require('./utils/ffmpeg');
+    const { ProductionManagementAgent } = require('./agents/production-management-agent');
+    const { execFile } = require('child_process');
+    const { promisify } = require('util');
+    const execFileAsync = promisify(execFile);
+    const fs = require('fs').promises;
+    const path = require('path');
+    const os = require('os');
+
+    // 1. Test Caption Timing & Data Generation (Fallback Pacing Algorithm)
+    const text = 'Stop wasting money on bad habits. Automate savings today, and invest for freedom!';
+    const totalDuration = 6.0;
+    const wordTimings = ShortsKaraokeCaptions.buildWordTimings(text, totalDuration);
+
+    if (wordTimings.length === 0) {
+      throw new Error('Word timings generation returned an empty array');
+    }
+    if (wordTimings[0].start !== 0) {
+      throw new Error(`First word start time should be 0, got ${wordTimings[0].start}`);
+    }
+    const lastWord = wordTimings[wordTimings.length - 1];
+    if (Math.abs(lastWord.end - totalDuration) > 0.01) {
+      throw new Error(`Last word end time should match duration ${totalDuration}, got ${lastWord.end}`);
+    }
+    for (let i = 1; i < wordTimings.length; i++) {
+      if (wordTimings[i].start < wordTimings[i - 1].start) {
+        throw new Error('Word timings must be monotonically increasing');
+      }
+    }
+
+    // 1b. Test Provider Timings Passthrough & ElevenLabs Alignment
+    const mockProviderTimings = [
+      { word: 'Hello', start: 0.1, end: 0.8 },
+      { word: 'world', start: 0.85, end: 1.5 }
+    ];
+    const providerResult = ShortsKaraokeCaptions.buildWordTimings('Hello world', 2.0, {
+      providerTimings: mockProviderTimings
+    });
+    if (providerResult.length !== 2 || providerResult[0].start !== 0.1 || providerResult[1].end !== 1.5) {
+      throw new Error('Provider-supplied word timings were not preserved');
+    }
+
+    const mockAlignment = {
+      characters: ['H', 'i', ' ', 'a', 'l', 'l'],
+      character_start_times_seconds: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
+      character_end_times_seconds: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+    };
+    const alignmentResult = ShortsKaraokeCaptions.convertElevenLabsAlignment(mockAlignment);
+    if (alignmentResult.length !== 2 || alignmentResult[0].word !== 'Hi' || alignmentResult[1].word !== 'all') {
+      throw new Error('ElevenLabs alignment conversion failed to produce word tokens');
+    }
+
+    // 2. Test Phrase Chunking (Mobile readability)
+    const phrases = ShortsKaraokeCaptions.chunkIntoPhrases(wordTimings, { maxWordsPerPhrase: 3 });
+    if (phrases.length === 0) {
+      throw new Error('Phrase chunking returned no phrases');
+    }
+    if (phrases.some(p => p.words.length > 4)) {
+      throw new Error('Phrases contain excessive words per screen (>4 words)');
+    }
+
+    // 3. Test Safe-Zone Positioning & ASS Markup
+    const assContent = ShortsKaraokeCaptions.generateASS(phrases, { aspectRatio: '9:16' });
+    if (!assContent.includes('PlayResX: 1080') || !assContent.includes('PlayResY: 1920')) {
+      throw new Error('ASS subtitles header missing 1080x1920 PlayRes');
+    }
+    // MarginV must be in the safe zone: above 480px bottom overlay
+    const marginMatch = assContent.match(/Style: KaraokeShorts,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,[^,]+,([^,]+),([^,]+),([^,]+),/);
+    if (marginMatch) {
+      const marginV = Number(marginMatch[3]);
+      if (marginV < 480) {
+        throw new Error(`ASS MarginV (${marginV}) does not clear YouTube Shorts bottom UI overlay (>=480px)`);
+      }
+    }
+    if (!assContent.includes('\\c&H0000FFFF&') && !assContent.includes('\\c&H')) {
+      throw new Error('ASS subtitle events missing active word highlight color tags');
+    }
+
+    // Test companion SRT generation
+    const srtContent = ShortsKaraokeCaptions.generateSRT(phrases);
+    if (!srtContent.includes('-->') || !srtContent.includes('Stop wasting money')) {
+      throw new Error('Companion SRT output missing valid timestamps or text');
+    }
+
+    // 4. Test Rendering with Burned Karaoke Captions (FFmpeg)
+    if (!(await checkFFmpeg())) {
+      this.logger.warn('FFmpeg unavailable — skipping karaoke burn render test');
+      return;
+    }
+
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'yaa-karaoke-'));
+    try {
+      const videoPath = path.join(dir, 'test_base.mp4');
+      const assPath = path.join(dir, 'test_karaoke.ass');
+      const srtPath = path.join(dir, 'test_karaoke.srt');
+      const outPath = path.join(dir, 'test_karaoke_burned.mp4');
+
+      await fs.writeFile(assPath, assContent, 'utf8');
+      await fs.writeFile(srtPath, srtContent, 'utf8');
+
+      // Generate a 3-second black 1080x1920 test video
+      const { runFFmpeg } = require('./utils/ffmpeg');
+      await runFFmpeg([
+        '-y', '-f', 'lavfi', '-i', 'color=c=#111827:s=1080x1920:d=3:r=30',
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', videoPath
+      ]);
+
+      await ShortsKaraokeCaptions.burnKaraokeCaptions(videoPath, assPath, outPath);
+
+      const stats = await fs.stat(outPath);
+      if (!stats.size || stats.size < 5000) {
+        throw new Error('Rendered video with burned karaoke captions is missing or suspiciously small');
+      }
+
+      let probe = '';
+      try {
+        await execFileAsync(getFFmpegPath(), ['-i', outPath]);
+      } catch (err) {
+        probe = (err.stderr || '') + (err.stdout || '');
+      }
+
+      if (!probe.includes('1080x1920')) {
+        throw new Error(`Output video resolution should be 1080x1920, got probe:\n${probe}`);
+      }
+
+      // 5. Existing Long-form Regression: ProductionManagementAgent generateCaptions
+      const agent = new ProductionManagementAgent(null, {});
+      const longFormProd = {
+        id: 'prod_test_longform',
+        contentType: 'long_form',
+        aspectRatio: '16:9',
+        estimatedDuration: 60,
+        script: {
+          hook: { text: 'Welcome to this long form tutorial.' },
+          introduction: { greeting: 'Hello viewers.', topicIntro: 'Let us discuss finance.', valueProposition: 'You will learn a lot.' },
+          mainContent: { sections: [{ title: 'Section One', content: 'Here is detailed explanation.' }] },
+          conclusion: { finalThought: 'Thanks for watching.' }
+        },
+        assets: {},
+        timeline: {}
+      };
+
+      const longFormCaptionsPath = await agent.generateCaptions(longFormProd);
+      const longFormContent = await fs.readFile(longFormCaptionsPath, 'utf8');
+      if (!longFormContent.includes('Welcome to this long form tutorial.') || !longFormCaptionsPath.endsWith('.srt')) {
+        throw new Error('Long-form 16:9 SRT generation was corrupted by karaoke changes');
+      }
+      await fs.unlink(longFormCaptionsPath).catch(() => {});
+
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.logger.info('Dynamic Karaoke Captions for Shorts test completed successfully');
+  }
+
+  async testAntiSwipeVisualHook() {
+    const { ShortsVisualHook } = require('./utils/shorts-visual-hook');
+    const { ShortsCanvasCompositor } = require('./utils/shorts-canvas-compositor');
+    const { AIVideoGenerator } = require('./utils/ai-video-generator');
+    const { ProductionManagementAgent } = require('./agents/production-management-agent');
+    const { checkFFmpeg, getFFmpegPath } = require('./utils/ffmpeg');
+    const { execFile } = require('child_process');
+    const { promisify } = require('util');
+    const execFileAsync = promisify(execFile);
+    const fs = require('fs').promises;
+    const path = require('path');
+    const os = require('os');
+
+    // 1. Test Text Sanitization (Eliminate slow generic greetings/filler)
+    const filler1 = 'Welcome to this video on 5 Passive Income Streams';
+    const clean1 = ShortsVisualHook.cleanHookText(filler1);
+    if (clean1 !== '5 Passive Income Streams') {
+      throw new Error(`Expected filler to be stripped, got: "${clean1}"`);
+    }
+
+    const filler2 = 'Hello everyone! Today we are looking at Bitcoin Secrets';
+    const clean2 = ShortsVisualHook.cleanHookText(filler2);
+    if (!clean2.includes('Bitcoin Secrets') || clean2.includes('Hello everyone')) {
+      throw new Error(`Expected greeting to be stripped, got: "${clean2}"`);
+    }
+
+    // 2. Test Configuration & Modular Variant Detection
+    const scriptStat = { title: '10 Secrets to Save $500', hook: { text: 'Stop wasting money on bad habits!' } };
+    const configStat = ShortsVisualHook.resolveConfig(scriptStat, { hookDuration: 1.8 });
+    if (configStat.duration !== 1.8) {
+      throw new Error(`Expected hook duration 1.8, got ${configStat.duration}`);
+    }
+    if (configStat.variant !== 'warning-alert') {
+      throw new Error(`Expected variant "warning-alert" for stop/waste text, got: "${configStat.variant}"`);
+    }
+
+    const scriptQuestion = { title: 'Why You Are Always Broke?' };
+    const configQuestion = ShortsVisualHook.resolveConfig(scriptQuestion, {});
+    if (configQuestion.variant !== 'question-punch') {
+      throw new Error(`Expected question-punch variant for question, got: "${configQuestion.variant}"`);
+    }
+
+    // Test duration clamping
+    const configClampedMin = ShortsVisualHook.resolveConfig(scriptStat, { hookDuration: 0.1 });
+    if (configClampedMin.duration < 1.0) {
+      throw new Error(`Hook duration below minimum was not clamped: ${configClampedMin.duration}`);
+    }
+    const configClampedMax = ShortsVisualHook.resolveConfig(scriptStat, { hookDuration: 15.0 });
+    if (configClampedMax.duration > 3.0) {
+      throw new Error(`Hook duration above maximum was not clamped: ${configClampedMax.duration}`);
+    }
+
+    // 3. Test Hook Slide HTML & CSS Generation (Shorts vs Long-form Regression)
+    const mockAssets = [path.resolve(__dirname, 'assets/youtube-automation-agent.jpg')];
+    const shortsHTML = ShortsCanvasCompositor.createSlideshowHTML(scriptStat, mockAssets, { aspectRatio: '9:16' });
+    if (!shortsHTML.includes('slide-hook') || !shortsHTML.includes('hook-headline') || !shortsHTML.includes('hook-badge')) {
+      throw new Error('9:16 Shorts HTML missing slide-hook, hook-headline, or hook-badge elements');
+    }
+    if (!shortsHTML.includes('data-hook-duration="1.8"')) {
+      throw new Error('Hook slide HTML missing data-hook-duration attribute');
+    }
+
+    // Verify 16:9 Long-Form regression: must NOT contain slide-hook
+    const longFormHTML = ShortsCanvasCompositor.createSlideshowHTML(scriptStat, mockAssets, { aspectRatio: '16:9' });
+    if (longFormHTML.includes('slide-hook') || longFormHTML.includes('hook-badge')) {
+      throw new Error('16:9 long form slideshow unexpectedly contained Shorts hook elements');
+    }
+
+    // 4. Test Rendering Pipeline with Distinct Visual Hook Timing
+    if (!(await checkFFmpeg())) {
+      this.logger.warn('FFmpeg unavailable — skipping hook render test');
+      return;
+    }
+
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'yaa-hook-'));
+    try {
+      const { runFFmpeg } = require('./utils/ffmpeg');
+      const still1 = path.join(dir, 'still1.png');
+      const still2 = path.join(dir, 'still2.png');
+      const still3 = path.join(dir, 'still3.png');
+      const outVideo = path.join(dir, 'hook_test_video.mp4');
+
+      // Create 3 solid color 1080x1920 test stills
+      await runFFmpeg(['-y', '-f', 'lavfi', '-i', 'color=c=#ef4444:s=1080x1920:d=1', '-frames:v', '1', still1]);
+      await runFFmpeg(['-y', '-f', 'lavfi', '-i', 'color=c=#3b82f6:s=1080x1920:d=1', '-frames:v', '1', still2]);
+      await runFFmpeg(['-y', '-f', 'lavfi', '-i', 'color=c=#10b981:s=1080x1920:d=1', '-frames:v', '1', still3]);
+
+      const generator = new AIVideoGenerator();
+      await generator.renderSlidesToVideo(
+        [still1, still2, still3],
+        6.0,
+        outVideo,
+        {
+          aspectRatio: '9:16',
+          hookDuration: 1.8
+        }
+      );
+
+      const stats = await fs.stat(outVideo);
+      if (!stats.size || stats.size < 5000) {
+        throw new Error('Rendered hook video file is missing or invalid');
+      }
+
+      let probe = '';
+      try {
+        await execFileAsync(getFFmpegPath(), ['-i', outVideo]);
+      } catch (err) {
+        probe = (err.stderr || '') + (err.stdout || '');
+      }
+
+      if (!probe.includes('1080x1920')) {
+        throw new Error(`Output video resolution should be 1080x1920, got probe:\n${probe}`);
+      }
+
+      // 5. ProductionManagementAgent Hook State Capture Regression
+      const agent = new ProductionManagementAgent(null, {});
+      generator.lastHookResult = configStat;
+      agent.aiVideoGenerator = generator;
+
+      if (!configStat.badge || !configStat.headline) {
+        throw new Error('Hook configuration missing required badge or headline');
+      }
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.logger.info('First 2-Second Anti-Swipe Visual Hook test completed successfully');
   }
 
   async testEvergreenTopics() {

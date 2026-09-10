@@ -7,6 +7,9 @@ const sharp = require('sharp');
 const { Logger } = require('./logger');
 const { runFFmpeg, checkFFmpeg, ffmpegInstallHint } = require('./ffmpeg');
 const { MediaGenerationService } = require('./media-generation-service');
+const { ShortsCanvasCompositor, CANVAS_PRESETS } = require('./shorts-canvas-compositor');
+const { ShortsKaraokeCaptions } = require('./shorts-karaoke-captions');
+const { ShortsVisualHook } = require('./shorts-visual-hook');
 
 class AIVideoGenerator {
   constructor(credentials, options = {}) {
@@ -15,6 +18,9 @@ class AIVideoGenerator {
     this.db = options.db || null;
     this.lastVideoResult = null;
     this.lastNarrationResult = null;
+    this.lastWordTimings = null;
+    this.lastCaptionsResult = null;
+    this.lastHookResult = null;
     
     // Initialize AI services with graceful fallback
     const openaiKey = resolvedCredentials.openai?.apiKey || process.env.OPENAI_API_KEY;
@@ -92,6 +98,7 @@ class AIVideoGenerator {
         externalTaskId: null,
         generatedAt: new Date().toISOString(),
         simulated: !usable,
+        wordTimings: this.lastWordTimings || null,
         cost: { provider, amount: null, currency: null, invoiceRequired: provider !== 'simulation' }
       };
       return generatedPath;
@@ -107,8 +114,9 @@ class AIVideoGenerator {
   }
 
   async generateElevenLabsTTS(text, outputPath) {
-    const url = `https://api.elevenlabs.io/v1/text-to-speech/${this.elevenLabsVoiceId}`;
-    
+    const timestampUrl = `https://api.elevenlabs.io/v1/text-to-speech/${this.elevenLabsVoiceId}/with-timestamps`;
+    const fallbackUrl = `https://api.elevenlabs.io/v1/text-to-speech/${this.elevenLabsVoiceId}`;
+
     const data = {
       text: text,
       model_id: this.elevenLabsModel,
@@ -120,9 +128,33 @@ class AIVideoGenerator {
       }
     };
 
+    try {
+      const response = await axios({
+        method: 'POST',
+        url: timestampUrl,
+        data: data,
+        headers: {
+          'Content-Type': 'application/json',
+          'xi-api-key': this.elevenLabsApiKey
+        }
+      });
+
+      if (response.data && response.data.audio_base64) {
+        const audioBuffer = Buffer.from(response.data.audio_base64, 'base64');
+        await fs.writeFile(outputPath, audioBuffer);
+        if (response.data.alignment) {
+          this.lastWordTimings = ShortsKaraokeCaptions.convertElevenLabsAlignment(response.data.alignment);
+        }
+        this.logger.info('ElevenLabs TTS with word timestamps complete');
+        return outputPath;
+      }
+    } catch (_err) {
+      // Fallback to standard endpoint
+    }
+
     const response = await axios({
       method: 'POST',
-      url: url,
+      url: fallbackUrl,
       data: data,
       headers: {
         'Accept': 'audio/mpeg',
@@ -339,7 +371,8 @@ class AIVideoGenerator {
             visualAssets,
             audioPath,
             outputPath,
-            options.estimatedDuration || this.calculateScriptDuration(script)
+            options.estimatedDuration || this.calculateScriptDuration(script),
+            options
           );
           this.lastVideoResult = {
             requestedProvider: generated.requestedProvider,
@@ -357,7 +390,7 @@ class AIVideoGenerator {
         }
       }
 
-      const produced = await this.generateSlideshowVideo(script, visualAssets, audioPath, outputPath);
+      const produced = await this.generateSlideshowVideo(script, visualAssets, audioPath, outputPath, options);
       this.lastVideoResult = { requestedProvider: 'slideshow', actualProvider: 'slideshow', model: 'local-ffmpeg', mode: 'slideshow', generatedSeconds: 0, tasks: [], scenes: [] };
       return produced;
     } catch (error) {
@@ -367,7 +400,7 @@ class AIVideoGenerator {
       const reason = error && error.message ? error.message : String(error);
       this.logger.error(`Video provider generation failed; using the local slideshow: ${reason}`, error);
       try {
-        const produced = await this.generateSlideshowVideo(script, visualAssets, audioPath, outputPath);
+        const produced = await this.generateSlideshowVideo(script, visualAssets, audioPath, outputPath, options);
         this.lastVideoResult = {
           requestedProvider: this.lastVideoResult?.requestedProvider || 'configured-provider',
           actualProvider: 'slideshow', model: 'local-ffmpeg', mode: 'fallback', generatedSeconds: 0,
@@ -386,7 +419,15 @@ class AIVideoGenerator {
     }
   }
 
-  async generateHybridVideo(clips, visualAssets, audioPath, outputPath, totalDuration) {
+  async generateShortSlideshowVideo(script, visualAssets, audioPath, outputPath, options = {}) {
+    return this.generateSlideshowVideo(script, visualAssets, audioPath, outputPath, {
+      ...options,
+      aspectRatio: '9:16',
+      isShort: true
+    });
+  }
+
+  async generateHybridVideo(clips, visualAssets, audioPath, outputPath, totalDuration, options = {}) {
     if (!(await checkFFmpeg())) throw new Error(ffmpegInstallHint());
     const validImages = await this.filterLocalImageAssets(visualAssets);
     const segments = clips.map(clip => ({ type: 'video', path: clip.path, duration: clip.duration }));
@@ -399,20 +440,22 @@ class AIVideoGenerator {
     if (!segments.length) throw new Error('No usable provider clips or still images were generated');
 
     const visualPath = outputPath.replace(/\.mp4$/i, '_hybrid_visual.mp4');
-    await this.renderMediaTimeline(segments, visualPath);
+    await this.renderMediaTimeline(segments, visualPath, options);
     await this.addAudioToVideo(visualPath, audioPath, outputPath, { loopVideo: true });
     await fs.unlink(visualPath).catch(() => {});
     return outputPath;
   }
 
-  async renderMediaTimeline(segments, outputPath) {
+  async renderMediaTimeline(segments, outputPath, options = {}) {
+    const canvas = ShortsCanvasCompositor.resolveCanvas(options);
+    const { width, height } = canvas;
     const args = ['-y'];
     for (const segment of segments) {
       if (segment.type === 'image') args.push('-loop', '1', '-t', Number(segment.duration).toFixed(2), '-framerate', '30', '-i', segment.path);
       else args.push('-stream_loop', '-1', '-i', segment.path);
     }
     const filters = segments.map((segment, index) =>
-      `[${index}:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p,trim=duration=${Number(segment.duration).toFixed(2)},setpts=PTS-STARTPTS[v${index}]`
+      `[${index}:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p,trim=duration=${Number(segment.duration).toFixed(2)},setpts=PTS-STARTPTS[v${index}]`
     );
     filters.push(`${segments.map((_, index) => `[v${index}]`).join('')}concat=n=${segments.length}:v=1:a=0[vout]`);
     args.push('-filter_complex', filters.join(';'), '-map', '[vout]', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', outputPath);
@@ -465,24 +508,25 @@ class AIVideoGenerator {
     return outputPath;
   }
 
-  async generateSlideshowVideo(script, visualAssets, audioPath, outputPath) {
+  async generateSlideshowVideo(script, visualAssets, audioPath, outputPath, options = {}) {
     this.logger.info('Creating slideshow video...');
 
     if (!(await checkFFmpeg())) {
       throw new Error(ffmpegInstallHint());
     }
 
+    const canvas = ShortsCanvasCompositor.resolveCanvas(options);
     const { chromium } = require('playwright');
     const browser = await chromium.launch();
     const slidesDir = path.join(path.dirname(outputPath), 'slides');
 
     try {
       const page = await browser.newPage();
-      await page.setViewportSize({ width: 1920, height: 1080 });
+      await page.setViewportSize({ width: canvas.width, height: canvas.height });
 
       // Create HTML for slideshow (only real image files can be embedded)
       const imageAssets = await this.filterImageAssets(visualAssets);
-      await page.setContent(this.createSlideshowHTML(script, imageAssets));
+      await page.setContent(this.createSlideshowHTML(script, imageAssets, options));
 
       // Freeze CSS transitions/animations so each still is captured fully rendered
       await page.addStyleTag({ content: '* { transition: none !important; animation: none !important; }' });
@@ -508,10 +552,48 @@ class AIVideoGenerator {
 
       const videoPath = outputPath.replace('.mp4', '_visual.mp4');
       const duration = this.calculateScriptDuration(script);
-      await this.renderSlidesToVideo(stills, duration, videoPath);
 
-      // Add audio
-      await this.addAudioToVideo(videoPath, audioPath, outputPath);
+      const isShorts = canvas.aspectRatio === '9:16';
+      if (isShorts && options.visualHook !== false && options.hook !== false) {
+        this.lastHookResult = ShortsVisualHook.resolveConfig(script, options);
+      } else {
+        this.lastHookResult = null;
+      }
+
+      await this.renderSlidesToVideo(stills, duration, videoPath, {
+        ...options,
+        canvas,
+        hookConfig: this.lastHookResult
+      });
+
+      // Add audio and optional dynamic karaoke captions for Shorts
+      if (isShorts && options.karaoke !== false) {
+        const audioMuxedPath = outputPath.replace('.mp4', '_audiomux.mp4');
+        await this.addAudioToVideo(videoPath, audioPath, audioMuxedPath, options);
+
+        const captionsDir = path.join(path.dirname(outputPath), 'captions');
+        const baseName = path.basename(outputPath, '.mp4');
+        const measuredDuration = await this.getAudioDuration(audioPath);
+        const effectiveDuration = measuredDuration > 0 ? measuredDuration : duration;
+
+        const captionResult = await ShortsKaraokeCaptions.processCaptions({
+          script,
+          audioDuration: effectiveDuration,
+          outputDir: captionsDir,
+          baseName,
+          options: {
+            ...options,
+            canvas,
+            providerTimings: options.providerTimings || this.lastNarrationResult?.wordTimings || this.lastWordTimings
+          }
+        });
+
+        await ShortsKaraokeCaptions.burnKaraokeCaptions(audioMuxedPath, captionResult.assPath, outputPath);
+        await fs.unlink(audioMuxedPath).catch(() => {});
+        this.lastCaptionsResult = captionResult;
+      } else {
+        await this.addAudioToVideo(videoPath, audioPath, outputPath, options);
+      }
 
       return outputPath;
     } finally {
@@ -520,35 +602,81 @@ class AIVideoGenerator {
     }
   }
 
-  async renderSlidesToVideo(stills, totalDuration, videoPath) {
+  async renderSlidesToVideo(stills, totalDuration, videoPath, options = {}) {
     if (stills.length === 0) {
       throw new Error('No slides to render');
     }
 
-    const fade = 0.5;
-    const perSlide = Math.max(2, totalDuration / stills.length);
-
-    const args = ['-y'];
-    for (const still of stills) {
-      args.push('-loop', '1', '-t', perSlide.toFixed(2), '-framerate', '30', '-i', still);
-    }
+    const canvas = ShortsCanvasCompositor.resolveCanvas(options);
+    const isShorts = canvas.aspectRatio === '9:16';
+    const isHookEnabled = isShorts && options.hook !== false && options.visualHook !== false;
 
     if (stills.length === 1) {
-      args.push('-vf', 'format=yuv420p', '-c:v', 'libx264', videoPath);
+      const args = ['-y', '-loop', '1', '-t', Math.max(2, totalDuration).toFixed(2), '-framerate', '30', '-i', stills[0]];
+      args.push('-vf', `scale=${canvas.width}:${canvas.height}:force_original_aspect_ratio=decrease,pad=${canvas.width}:${canvas.height}:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p`, '-c:v', 'libx264', videoPath);
       await runFFmpeg(args);
       return videoPath;
     }
 
-    // Chain crossfades: transition k starts fade seconds before slide k ends
+    const args = ['-y'];
     const filters = [];
-    let prev = '[0:v]';
-    for (let i = 1; i < stills.length; i++) {
-      const out = `[v${i}]`;
-      const offset = (i * (perSlide - fade)).toFixed(2);
-      filters.push(`${prev}[${i}:v]xfade=transition=fade:duration=${fade}:offset=${offset}${out}`);
-      prev = out;
+
+    if (isHookEnabled) {
+      // Phase 1 Feature 1.3: Anti-Swipe Visual Hook Timing
+      const hookCfg = options.hookConfig || ShortsVisualHook.resolveConfig({}, options);
+      const hookDuration = hookCfg.duration; // Configurable, default 1.8s (clamped 1.0-3.0s)
+      const hookFade = 0.35; // Snappy 350ms transition
+      const standardFade = 0.4;
+
+      const numRemaining = stills.length - 1;
+      const remainingDuration = Math.max(numRemaining * 1.5, totalDuration - hookDuration);
+      const perOtherSlide = remainingDuration / numRemaining;
+
+      // Input 0 (Hook slide)
+      args.push('-loop', '1', '-t', (hookDuration + hookFade).toFixed(2), '-framerate', '30', '-i', stills[0]);
+
+      // Inputs 1..N-1
+      for (let i = 1; i < stills.length; i++) {
+        const isLast = i === stills.length - 1;
+        const inputDuration = isLast ? perOtherSlide : perOtherSlide + standardFade;
+        args.push('-loop', '1', '-t', inputDuration.toFixed(2), '-framerate', '30', '-i', stills[i]);
+      }
+
+      let prev = '[0:v]';
+      let currentPlayback = hookDuration;
+
+      for (let i = 1; i < stills.length; i++) {
+        const out = `[v${i}]`;
+        const fade = i === 1 ? hookFade : standardFade;
+        const offset = (i === 1 ? hookDuration : currentPlayback).toFixed(2);
+        filters.push(`${prev}[${i}:v]xfade=transition=fade:duration=${fade.toFixed(2)}:offset=${offset}${out}`);
+        prev = out;
+        if (i === 1) {
+          currentPlayback = hookDuration + perOtherSlide;
+        } else {
+          currentPlayback += perOtherSlide;
+        }
+      }
+
+      filters.push(`${prev}scale=${canvas.width}:${canvas.height}:force_original_aspect_ratio=decrease,pad=${canvas.width}:${canvas.height}:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p[vfinal]`);
+    } else {
+      // 16:9 Long-Form / Standard Crossfade (Preserves existing behavior exactly)
+      const fade = 0.5;
+      const perSlide = Math.max(2, totalDuration / stills.length);
+
+      for (const still of stills) {
+        args.push('-loop', '1', '-t', perSlide.toFixed(2), '-framerate', '30', '-i', still);
+      }
+
+      let prev = '[0:v]';
+      for (let i = 1; i < stills.length; i++) {
+        const out = `[v${i}]`;
+        const offset = (i * (perSlide - fade)).toFixed(2);
+        filters.push(`${prev}[${i}:v]xfade=transition=fade:duration=${fade}:offset=${offset}${out}`);
+        prev = out;
+      }
+      filters.push(`${prev}scale=${canvas.width}:${canvas.height}:force_original_aspect_ratio=decrease,pad=${canvas.width}:${canvas.height}:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p[vfinal]`);
     }
-    filters.push(`${prev}format=yuv420p[vfinal]`);
 
     args.push(
       '-filter_complex', filters.join(';'),
@@ -591,147 +719,8 @@ class AIVideoGenerator {
     return images;
   }
 
-  createSlideshowHTML(script, visualAssets) {
-    return `
-<!DOCTYPE html>
-<html>
-<head>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            width: 1920px;
-            height: 1080px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            font-family: 'Arial', sans-serif;
-            overflow: hidden;
-        }
-        
-        .slide {
-            position: absolute;
-            width: 100%;
-            height: 100%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            opacity: 0;
-            transition: opacity 2s ease-in-out;
-        }
-        
-        .slide.active {
-            opacity: 1;
-        }
-        
-        .content {
-            text-align: center;
-            color: white;
-            max-width: 80%;
-        }
-        
-        h1 {
-            font-size: 72px;
-            margin-bottom: 30px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
-        }
-        
-        h2 {
-            font-size: 48px;
-            margin-bottom: 20px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
-        }
-        
-        p {
-            font-size: 36px;
-            line-height: 1.4;
-            text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
-        }
-        
-        .background-image {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-            opacity: 0.3;
-            z-index: -1;
-        }
-        
-        .particles {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            z-index: -1;
-        }
-        
-        .particle {
-            position: absolute;
-            background: rgba(255,255,255,0.8);
-            border-radius: 50%;
-            animation: float 6s ease-in-out infinite;
-        }
-        
-        @keyframes float {
-            0%, 100% { transform: translateY(0px); }
-            50% { transform: translateY(-20px); }
-        }
-    </style>
-</head>
-<body>
-    <div class="particles"></div>
-    
-    <!-- Title Slide -->
-    <div class="slide active">
-        ${visualAssets[0] ? `<img class="background-image" src="${visualAssets[0]}" />` : ''}
-        <div class="content">
-            <h1>${script.title}</h1>
-            <p>Ethereal Dreamscript</p>
-        </div>
-    </div>
-    
-    ${this.generateContentSlides(script, visualAssets).join('')}
-    
-    <!-- Subscribe Slide -->
-    <div class="slide">
-        <div class="content">
-            <h2>✨ Subscribe for More Stories ✨</h2>
-            <p>New content daily at 2:00 PM</p>
-        </div>
-    </div>
-    
-    <script>
-        // Create floating particles
-        function createParticles() {
-            const container = document.querySelector('.particles');
-            for (let i = 0; i < 20; i++) {
-                const particle = document.createElement('div');
-                particle.className = 'particle';
-                particle.style.left = Math.random() * 100 + '%';
-                particle.style.top = Math.random() * 100 + '%';
-                particle.style.width = (Math.random() * 4 + 2) + 'px';
-                particle.style.height = particle.style.width;
-                particle.style.animationDelay = Math.random() * 6 + 's';
-                container.appendChild(particle);
-            }
-        }
-        
-        let currentSlide = 0;
-        const slides = document.querySelectorAll('.slide');
-        
-        function advanceAnimation() {
-            slides[currentSlide].classList.remove('active');
-            currentSlide = (currentSlide + 1) % slides.length;
-            slides[currentSlide].classList.add('active');
-        }
-        
-        window.advanceAnimation = advanceAnimation;
-        createParticles();
-    </script>
-</body>
-</html>`;
+  createSlideshowHTML(script, visualAssets = [], options = {}) {
+    return ShortsCanvasCompositor.createSlideshowHTML(script, visualAssets, options);
   }
 
   generateContentSlides(script, visualAssets) {
@@ -981,6 +970,29 @@ class AIVideoGenerator {
       simulated: true
     };
   }
+
+  async getAudioDuration(audioPath) {
+    if (!audioPath) return 0;
+    try {
+      const { execFile } = require('child_process');
+      const { promisify } = require('util');
+      const execFileAsync = promisify(execFile);
+      const { getFFmpegPath } = require('./ffmpeg');
+      let probe = '';
+      try {
+        await execFileAsync(getFFmpegPath(), ['-i', audioPath]);
+      } catch (err) {
+        probe = (err.stderr || '') + (err.stdout || '');
+      }
+      const match = probe.match(/Duration: (\d{2}):(\d{2}):(\d{2}\.\d+)/);
+      if (match) {
+        return Number(match[1]) * 3600 + Number(match[2]) * 60 + parseFloat(match[3]);
+      }
+    } catch (_e) {
+      // fallback
+    }
+    return 0;
+  }
 }
 
-module.exports = { AIVideoGenerator };
+module.exports = { AIVideoGenerator, ShortsCanvasCompositor, CANVAS_PRESETS, ShortsKaraokeCaptions, ShortsVisualHook };

@@ -3,7 +3,7 @@ const path = require('path');
 const { runFFmpeg } = require('./ffmpeg');
 const { Logger } = require('./logger');
 
-const LAYOUTS = new Set(['blur', 'crop', 'stacked']);
+const LAYOUTS = new Set(['blur', 'crop', 'stacked', 'native']);
 
 function clamp(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, Number(value) || minimum));
@@ -65,10 +65,15 @@ class ShortsRepurposingService {
     const windows = this.selectWindows(scenes, count);
     const baseTime = this.nextPublishBase(bundle);
     const inheritedEvidence = this.inheritedEvidence(bundle);
+    const isVerticalSource = bundle.assets?.finalVideo?.aspectRatio === '9:16' ||
+      bundle.assets?.finalVideo?.resolution === '1080x1920';
     const clips = windows.map((window, position) => {
       const lead = window.scenes[0];
       const hook = sentence(lead.scriptText) || lead.label || sourceTitle;
       const title = truncate(hook, 96);
+      const layout = isVerticalSource
+        ? 'native'
+        : (position === 1 ? 'crop' : position === 2 ? 'stacked' : 'blur');
       return {
         productionId,
         position,
@@ -78,7 +83,7 @@ class ShortsRepurposingService {
         sourceSceneIds: window.scenes.map(scene => scene.id),
         startSeconds: window.startSeconds,
         duration: window.duration,
-        layout: position === 1 ? 'crop' : position === 2 ? 'stacked' : 'blur',
+        layout,
         rationale: `Selected from ${window.scenes.map(scene => scene.label).join(', ')} as a self-contained vertical excerpt.`,
         status: 'proposed',
         publishTime: new Date(baseTime.getTime() + position * 86400000).toISOString(),
@@ -144,7 +149,7 @@ class ShortsRepurposingService {
       changes.tags = [...new Set(tags.map(tag => String(tag).trim()).filter(Boolean))].slice(0, 30);
     }
     if (input.layout !== undefined) {
-      if (!LAYOUTS.has(input.layout)) throw new Error('Short layout must be blur, crop, or stacked');
+      if (!LAYOUTS.has(input.layout)) throw new Error('Short layout must be blur, crop, stacked, or native');
       changes.layout = input.layout;
     }
     if (input.publishTime !== undefined) {
@@ -181,11 +186,22 @@ class ShortsRepurposingService {
     await fs.mkdir(directory, { recursive: true });
     const outputPath = path.join(directory, `${clip.id}.mp4`);
     const captionsPath = path.join(directory, `${clip.id}.srt`);
-    await fs.writeFile(captionsPath, this.buildCaptions(sourceScenes, clip.duration), 'utf8');
+
+    const { ShortsKaraokeCaptions } = require('./shorts-karaoke-captions');
+    const combinedText = sourceScenes.map(s => s.scriptText || s.label || '').filter(Boolean).join(' ');
+    const karaokeResult = await ShortsKaraokeCaptions.processCaptions({
+      text: combinedText || 'Watch the full video for more.',
+      audioDuration: clip.duration,
+      outputDir: directory,
+      baseName: clip.id,
+      options: { aspectRatio: '9:16', isShort: true }
+    });
+
     await this.db.updateShortClip(clip.id, { status: 'rendering', error: null });
 
     try {
-      const filter = this.videoFilter(clip.layout, captionsPath);
+      const subtitlePath = karaokeResult?.assPath || captionsPath;
+      const filter = this.videoFilter(clip.layout, subtitlePath);
       await this.runFFmpeg([
         '-y', '-ss', String(clip.startSeconds), '-i', sourceVideo, '-t', String(clip.duration),
         '-filter_complex', filter, '-map', '[shortv]', '-map', '0:a:0?',
@@ -210,7 +226,13 @@ class ShortsRepurposingService {
       .replaceAll('\\', '/')
       .replace(':', '\\:')
       .replaceAll("'", "\\'");
-    const subtitles = `subtitles='${escapedCaptions}':force_style='FontName=Arial,FontSize=18,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=170'`;
+    const isASS = String(captionsPath || '').toLowerCase().endsWith('.ass');
+    const subtitles = isASS
+      ? `subtitles='${escapedCaptions}'`
+      : `subtitles='${escapedCaptions}':force_style='FontName=Arial,FontSize=18,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=260'`;
+    if (layout === 'native') {
+      return `[0:v]scale=${this.width}:${this.height}:force_original_aspect_ratio=decrease,pad=${this.width}:${this.height}:(ow-iw)/2:(oh-ih)/2:black,${subtitles},fps=30,format=yuv420p[shortv]`;
+    }
     if (layout === 'crop') {
       return `[0:v]scale=${this.width}:${this.height}:force_original_aspect_ratio=increase,crop=${this.width}:${this.height},${subtitles},fps=30,format=yuv420p[shortv]`;
     }
