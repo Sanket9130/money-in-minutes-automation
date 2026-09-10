@@ -1,8 +1,10 @@
 const { Logger } = require('../utils/logger');
 const { AITextService } = require('../utils/ai-text-service');
+const { SemanticDedupService } = require('../utils/semantic-dedup-service');
+const { TrendingTopicDiscovery } = require('../utils/trending-topic-discovery');
 
 class ContentStrategyAgent {
-  constructor(db, credentials) {
+  constructor(db, credentials, options = {}) {
     this.db = db;
     this.credentials = credentials;
     this.logger = new Logger('ContentStrategy');
@@ -10,6 +12,8 @@ class ContentStrategyAgent {
     this.competitorData = [];
     this.contentCalendar = [];
     this.aiTextService = new AITextService(credentials?.credentials || credentials || {});
+    this.trendingTopicDiscovery = options.trendingTopicDiscovery || new TrendingTopicDiscovery(credentials, options.discoveryOptions || {});
+    this.semanticDedupService = options.semanticDedupService || new SemanticDedupService(options.dedupOptions || {});
   }
 
   async initialize() {
@@ -29,201 +33,43 @@ class ContentStrategyAgent {
     }
   }
 
-  async analyzeTrends() {
+  async analyzeTrends(options = {}) {
     try {
-      // Analyze YouTube trends
-      const trends = await this.fetchYouTubeTrends();
-      
-      // Analyze competitor channels
-      const competitors = await this.analyzeCompetitors();
-      this.competitorData = competitors;
-      
-      // Combine insights
-      this.trendingTopics = this.mergeTrendData(trends, competitors);
-      
+      const result = await this.trendingTopicDiscovery.discoverTrendingTopics(options);
+      this.competitorData = result.competitorData;
+      this.trendingTopics = result.trendingTopics;
       this.logger.info(`Identified ${this.trendingTopics.length} trending topics`);
+      return this.trendingTopics;
     } catch (error) {
       this.logger.error('Error analyzing trends:', error);
-    }
-  }
-
-  async fetchYouTubeTrends() {
-    // Use YouTube API to fetch trending videos
-    const youtube = this.credentials.getYouTubeClient();
-    
-    try {
-      const response = await youtube.videos.list({
-        part: 'snippet,statistics',
-        chart: 'mostPopular',
-        maxResults: 50,
-        regionCode: process.env.YOUTUBE_REGION || 'US'
-      });
-
-      return response.data.items.map(video => ({
-        videoId: video.id,
-        title: video.snippet.title,
-        tags: video.snippet.tags || [],
-        viewCount: parseInt(video.statistics?.viewCount, 10) || 0,
-        category: video.snippet.categoryId,
-        publishedAt: video.snippet.publishedAt,
-        publisher: video.snippet.channelTitle || 'YouTube',
-        url: `https://www.youtube.com/watch?v=${video.id}`
-      }));
-    } catch (error) {
-      this.logger.error('Failed to fetch YouTube trends:', error);
+      this.trendingTopics = [];
+      this.competitorData = [];
       return [];
     }
   }
 
-  async analyzeCompetitors() {
-    const competitorChannels = (process.env.COMPETITOR_CHANNELS || '').split(',');
-    const competitorData = [];
-
-    for (const channelId of competitorChannels) {
-      if (!channelId) continue;
-      
-      try {
-        const videos = await this.getChannelVideos(channelId);
-        const analysis = this.analyzeVideoPerformance(videos);
-        competitorData.push({
-          channelId,
-          topPerformingTopics: analysis.topTopics,
-          averageViews: analysis.avgViews,
-          uploadFrequency: analysis.frequency
-        });
-      } catch (error) {
-        this.logger.error(`Failed to analyze competitor ${channelId}:`, error);
-      }
-    }
-
-    return competitorData;
+  async fetchYouTubeTrends(options = {}) {
+    return this.trendingTopicDiscovery.fetchYouTubeTrends(options);
   }
 
-  async getChannelVideos(channelId) {
-    const youtube = this.credentials.getYouTubeClient();
-    
-    try {
-      const response = await youtube.search.list({
-        part: 'snippet',
-        channelId: channelId,
-        maxResults: 20,
-        order: 'date',
-        type: 'video'
-      });
+  async analyzeCompetitors(options = {}) {
+    return this.trendingTopicDiscovery.fetchCompetitorTopics(options);
+  }
 
-      const videoIds = response.data.items.map(item => item.id.videoId).join(',');
-      
-      const videoDetails = await youtube.videos.list({
-        part: 'statistics,snippet',
-        id: videoIds
-      });
-
-      return videoDetails.data.items;
-    } catch (error) {
-      this.logger.error(`Failed to get videos for channel ${channelId}:`, error);
-      return [];
-    }
+  async getChannelVideos(channelId, options = {}) {
+    return this.trendingTopicDiscovery.getChannelVideos(channelId, options);
   }
 
   analyzeVideoPerformance(videos) {
-    if (!videos || videos.length === 0) {
-      return { topTopics: [], avgViews: 0, frequency: 0 };
-    }
-
-    const topics = {};
-    let totalViews = 0;
-
-    videos.forEach(video => {
-      const title = video.snippet.title.toLowerCase();
-      const views = parseInt(video.statistics?.viewCount, 10) || 0;
-      totalViews += views;
-
-      // Extract topics from title
-      const keywords = this.extractKeywords(title);
-      keywords.forEach(keyword => {
-        if (!topics[keyword]) topics[keyword] = { count: 0, views: 0, evidence: [] };
-        topics[keyword].count++;
-        topics[keyword].views += views;
-        topics[keyword].evidence.push({
-          url: `https://www.youtube.com/watch?v=${video.id}`,
-          title: video.snippet.title,
-          publisher: video.snippet.channelTitle || 'Configured competitor channel',
-          publishedAt: video.snippet.publishedAt,
-          sourceType: 'video'
-        });
-      });
-    });
-
-    const topTopics = Object.entries(topics)
-      .sort((a, b) => b[1].views - a[1].views)
-      .slice(0, 10)
-      .map(([topic, data]) => ({ topic, avgViews: data.views / data.count, evidence: data.evidence.slice(0, 5) }));
-
-    return {
-      topTopics,
-      avgViews: totalViews / videos.length,
-      frequency: videos.length
-    };
+    return this.trendingTopicDiscovery.analyzeVideoPerformance(videos);
   }
 
   extractKeywords(text) {
-    // Simple keyword extraction
-    const stopWords = ['the', 'is', 'at', 'which', 'on', 'and', 'a', 'an', 'as', 'are', 'was', 'were', 'been', 'be', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'must', 'can', 'could', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'what', 'which', 'who', 'when', 'where', 'why', 'how', 'all', 'each', 'every', 'both', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 'can', 'will', 'just', 'should', 'now'];
-    
-    return text
-      .toLowerCase()
-      .replace(/[^\w\s]/g, '')
-      .split(/\s+/)
-      .filter(word => word.length > 3 && !stopWords.includes(word));
+    return this.trendingTopicDiscovery.extractKeywords(text);
   }
 
   mergeTrendData(trends, competitors) {
-    const mergedTopics = new Map();
-
-    // Add trending topics
-    trends.forEach(trend => {
-      const keywords = this.extractKeywords(trend.title);
-      keywords.forEach(keyword => {
-        if (!mergedTopics.has(keyword)) {
-          mergedTopics.set(keyword, { score: 0, sources: [], evidence: [] });
-        }
-        const topic = mergedTopics.get(keyword);
-        topic.score += trend.viewCount / 1000000; // Normalize by millions
-        topic.sources.push('trending');
-        topic.evidence.push({
-          url: trend.url,
-          title: trend.title,
-          publisher: trend.publisher,
-          publishedAt: trend.publishedAt,
-          sourceType: 'video'
-        });
-      });
-    });
-
-    // Add competitor topics
-    competitors.forEach(competitor => {
-      if (competitor.topPerformingTopics) {
-        competitor.topPerformingTopics.forEach(({ topic, avgViews, evidence = [] }) => {
-          if (!mergedTopics.has(topic)) {
-            mergedTopics.set(topic, { score: 0, sources: [], evidence: [] });
-          }
-          const topicData = mergedTopics.get(topic);
-          topicData.score += avgViews / 100000; // Normalize
-          topicData.sources.push('competitor');
-          topicData.evidence.push(...evidence);
-        });
-      }
-    });
-
-    // Convert to array and sort by score
-    return Array.from(mergedTopics.entries())
-      .map(([topic, data]) => ({ topic, ...data }))
-      .map(item => ({
-        ...item,
-        evidence: [...new Map(item.evidence.filter(source => source.url).map(source => [source.url, source])).values()].slice(0, 5)
-      }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 50);
+    return this.trendingTopicDiscovery.mergeTrendData(trends, competitors);
   }
 
   async generateContentStrategy(requestedTopic = null) {
@@ -367,9 +213,13 @@ Do not invent trend data, statistics, sources, URLs, or factual claims. Use only
 
   buildFallbackAutonomousPlan(channelStrategy, research, targetCount) {
     const recent = new Set(research.recentTopics.map(topic => String(topic).toLowerCase()));
-    const readableSignals = research.signals
+    const rawSignals = research.signals
       .map(signal => signal.topic)
       .filter(topic => topic.includes(' ') && topic.length >= 8 && !recent.has(topic.toLowerCase()));
+    const { unique: readableSignals } = this.semanticDedupService.filterDuplicates(
+      rawSignals,
+      research.recentTopics || []
+    );
     const pillars = channelStrategy.contentPillars || [];
     const pillarTopics = pillars.map(pillar => `${pillar}: a practical guide for ${channelStrategy.audience}`);
     const candidates = [...readableSignals, ...pillarTopics, ...this.getEvergreenFallbackTopics()];
@@ -509,7 +359,14 @@ Avoid fabricated claims and unsupported numbers.`;
     // Use scoring algorithm to select best topic
     const recentTopics = this.getRecentTopics();
 
-    const scoredTopics = this.trendingTopics
+    // Semantic deduplication against recent topic history
+    const { unique: dedupedTopics } = this.semanticDedupService.filterDuplicates(
+      this.trendingTopics,
+      recentTopics
+    );
+
+    // Fallback safety: ensure exact lexical matches are also excluded
+    const scoredTopics = dedupedTopics
       .filter(topic => !recentTopics.includes(topic.topic))
       .map(topic => ({
         ...topic,
@@ -525,7 +382,12 @@ Avoid fabricated claims and unsupported numbers.`;
     }
 
     const fallbackTopics = this.getEvergreenFallbackTopics();
-    const pick = fallbackTopics[Math.floor(Math.random() * fallbackTopics.length)];
+    const { unique: dedupedFallbacks } = this.semanticDedupService.filterDuplicates(
+      fallbackTopics,
+      recentTopics
+    );
+    const pool = dedupedFallbacks.length > 0 ? dedupedFallbacks : fallbackTopics;
+    const pick = pool[Math.floor(Math.random() * pool.length)];
     this.logger.info(`Template mode: no readable trending topic available — using evergreen topic "${pick}"`);
     return { topic: pick, score: 1 };
   }

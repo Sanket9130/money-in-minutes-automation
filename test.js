@@ -86,7 +86,9 @@ class SystemTest {
       { name: 'Scene-Based Visual Treatment Engine', test: () => this.testVisualTreatmentEngine() },
       { name: 'Verified Financial & Data Visualization Engine', test: () => this.testFinancialVisualizationEngine() },
       { name: 'Professional Audio Enhancement Engine', test: () => this.testAudioEnhancementEngine() },
-      { name: 'Shorts Packaging & Publishing Pipeline', test: () => this.testShortsPackagingAndPublishingPipeline() }
+      { name: 'Shorts Packaging & Publishing Pipeline', test: () => this.testShortsPackagingAndPublishingPipeline() },
+      { name: 'Semantic Topic Deduplication Service', test: () => this.testSemanticDedupService() },
+      { name: 'Trending Topic Discovery Service', test: () => this.testTrendingTopicDiscovery() }
     ];
 
     let passed = 0;
@@ -4598,6 +4600,287 @@ class SystemTest {
     }
 
     this.logger.info('Shorts Packaging & Publishing Pipeline test completed successfully');
+  }
+
+  async testSemanticDedupService() {
+    const { SemanticDedupService } = require('./utils/semantic-dedup-service');
+    const { ContentStrategyAgent } = require('./agents/content-strategy-agent');
+
+    const dedup = new SemanticDedupService({
+      duplicateThreshold: 0.65,
+      strongDuplicateThreshold: 0.80
+    });
+
+    const topicA = 'Why Apple Ditched Intel';
+    const topicExact = 'Why Apple Ditched Intel';
+    const topicCase = '  WHY APPLE DITCHED INTEL!!  ';
+    const topicMinor = 'Why Did Apple Ditch Intel?';
+    const topicSyn1 = 'The Reason Apple Switched From Intel to M-Series';
+    const topicSyn2 = 'The Reason Mac Switched to M-Series';
+    const topicUnrelated = 'How Nvidia Makes Money From Data Centers';
+
+    // 1. Exact duplicate -> detected
+    const resExact = dedup.isDuplicate(topicExact, [topicA]);
+    if (!resExact.isDuplicate || resExact.similarityType !== 'EXACT' || resExact.score !== 1.0) {
+      throw new Error(`Exact duplicate not detected properly: ${JSON.stringify(resExact)}`);
+    }
+
+    // 2. Case variation -> detected
+    const resCase = dedup.isDuplicate(topicCase, [topicA]);
+    if (!resCase.isDuplicate || resCase.score !== 1.0) {
+      throw new Error(`Case variation not detected: ${JSON.stringify(resCase)}`);
+    }
+
+    // 3. Minor wording variation -> detected
+    const resMinor = dedup.isDuplicate(topicMinor, [topicA]);
+    if (!resMinor.isDuplicate || resMinor.score < 0.70) {
+      throw new Error(`Minor wording variation not detected: ${JSON.stringify(resMinor)}`);
+    }
+
+    // 4. Synonymous topic wording -> detected
+    const resSyn1 = dedup.isDuplicate(topicSyn1, [topicA]);
+    if (!resSyn1.isDuplicate || resSyn1.score < 0.65) {
+      throw new Error(`Synonymous topic 1 not detected: ${JSON.stringify(resSyn1)}`);
+    }
+
+    const resSyn2 = dedup.isDuplicate(topicSyn2, [topicA]);
+    if (!resSyn2.isDuplicate || resSyn2.score < 0.65) {
+      throw new Error(`Synonymous topic 2 (Mac to M-Series) not detected: ${JSON.stringify(resSyn2)}`);
+    }
+
+    // 5. Clearly unrelated topics -> NOT detected
+    const resUnrelated = dedup.isDuplicate(topicUnrelated, [topicA]);
+    if (resUnrelated.isDuplicate || resUnrelated.score >= 0.30) {
+      throw new Error(`Unrelated topic falsely flagged as duplicate: ${JSON.stringify(resUnrelated)}`);
+    }
+
+    // 6. Empty input -> safe behavior
+    const resEmpty1 = dedup.isDuplicate('', [topicA]);
+    const resEmpty2 = dedup.isDuplicate(null, [topicA]);
+    if (resEmpty1.isDuplicate || resEmpty2.isDuplicate) {
+      throw new Error('Empty input was incorrectly flagged as duplicate');
+    }
+
+    // 7. Missing history -> safe behavior
+    const resMissingHist = dedup.filterDuplicates([topicA], []);
+    if (resMissingHist.unique.length !== 1 || resMissingHist.duplicates.length !== 0) {
+      throw new Error('Missing history did not safely pass candidate');
+    }
+
+    // 8. Multiple candidates -> deterministic results & intra-batch deduplication
+    const candidates = [
+      'Why Apple Ditched Intel',
+      'The Reason Apple Switched From Intel to M-Series', // Duplicate of candidate 0
+      'How Nvidia Makes Money From Data Centers',        // Unique
+      'How Nvidia Monetizes Data Centers'                // Duplicate of candidate 2
+    ];
+    const filtered = dedup.filterDuplicates(candidates, []);
+    if (filtered.unique.length !== 2 || filtered.duplicates.length !== 2) {
+      throw new Error(`Intra-batch deduplication failed: ${JSON.stringify(filtered)}`);
+    }
+    if (filtered.unique[0] !== 'Why Apple Ditched Intel' || filtered.unique[1] !== 'How Nvidia Makes Money From Data Centers') {
+      throw new Error(`Unexpected unique topics retained: ${JSON.stringify(filtered.unique)}`);
+    }
+
+    // 9. Same input twice -> same result (determinism)
+    const run1 = dedup.calculateHybridSimilarity(topicA, topicSyn1);
+    const run2 = dedup.calculateHybridSimilarity(topicA, topicSyn1);
+    if (run1.score !== run2.score || run1.lexicalScore !== run2.lexicalScore || run1.semanticScore !== run2.semanticScore) {
+      throw new Error(`Non-deterministic similarity calculation: ${JSON.stringify(run1)} vs ${JSON.stringify(run2)}`);
+    }
+
+    // 10. Existing ContentStrategyAgent behavior remains functional
+    const agent = new ContentStrategyAgent(null, {}, { dedupOptions: { duplicateThreshold: 0.65 } });
+    agent.historicalPerformance = [
+      { topic: 'Why Apple Ditched Intel', createdAt: new Date().toISOString() }
+    ];
+
+    agent.trendingTopics = [
+      { topic: 'The Reason Apple Switched From Intel to M-Series', score: 9.0 },
+      { topic: 'How Nvidia Makes Money From Data Centers', score: 8.0 }
+    ];
+
+    const chosen = agent.selectOptimalTopic();
+    if (chosen.topic !== 'How Nvidia Makes Money From Data Centers') {
+      throw new Error(`ContentStrategyAgent failed to filter synonymous topic: chosen "${chosen.topic}"`);
+    }
+
+    this.logger.info('Semantic Topic Deduplication Service test completed successfully');
+  }
+
+  async testTrendingTopicDiscovery() {
+    const { TrendingTopicDiscovery } = require('./utils/trending-topic-discovery');
+    const { ContentStrategyAgent } = require('./agents/content-strategy-agent');
+    const { SemanticDedupService } = require('./utils/semantic-dedup-service');
+
+    // 1. Trend service can instantiate
+    const discovery = new TrendingTopicDiscovery({}, { regionCode: 'US' });
+    if (!discovery || typeof discovery.discoverTrendingTopics !== 'function') {
+      throw new Error('TrendingTopicDiscovery failed to instantiate');
+    }
+
+    // 2. Normalized topic candidate output has expected structure
+    const sampleTrends = [
+      {
+        id: 'vid1',
+        snippet: {
+          title: 'Nvidia AI Chip Revenue Surge Explained',
+          tags: ['nvidia', 'chips', 'ai', 'revenue'],
+          categoryId: '28',
+          publishedAt: new Date(Date.now() - 3600000 * 5).toISOString(),
+          channelTitle: 'Tech Insights'
+        },
+        statistics: { viewCount: '1000000' }
+      }
+    ];
+
+    const mockYouTube = {
+      videos: {
+        list: async ({ chart }) => {
+          if (chart === 'mostPopular') {
+            return { data: { items: sampleTrends } };
+          }
+          return { data: { items: [] } };
+        }
+      },
+      search: {
+        list: async () => ({ data: { items: [] } })
+      }
+    };
+
+    const mockCredentials = {
+      getYouTubeClient: () => mockYouTube
+    };
+
+    const serviceWithMock = new TrendingTopicDiscovery(mockCredentials);
+
+    // 3. YouTube trend response can be converted into candidates
+    const rawTrends = await serviceWithMock.fetchYouTubeTrends();
+    if (rawTrends.length !== 1 || rawTrends[0].title !== 'Nvidia AI Chip Revenue Surge Explained') {
+      throw new Error(`YouTube trend response conversion failed: ${JSON.stringify(rawTrends)}`);
+    }
+    if (typeof rawTrends[0].velocity !== 'number' || rawTrends[0].velocity <= 0) {
+      throw new Error(`Velocity was not calculated on trend item: ${JSON.stringify(rawTrends[0])}`);
+    }
+
+    // 4. Competitor signals can be merged
+    const sampleCompetitors = [
+      {
+        channelId: 'UC123456',
+        topPerformingTopics: [
+          {
+            topic: 'nvidia',
+            avgViews: 500000,
+            evidence: [{ url: 'https://youtube.com/watch?v=comp1', title: 'Nvidia secret' }]
+          }
+        ],
+        averageViews: 500000,
+        uploadFrequency: 4
+      }
+    ];
+
+    const mergedCandidates = serviceWithMock.mergeTrendData(rawTrends, sampleCompetitors);
+    if (!Array.isArray(mergedCandidates) || mergedCandidates.length === 0) {
+      throw new Error('Merging trend and competitor data failed');
+    }
+
+    const nvidiaCandidate = mergedCandidates.find(c => c.topic === 'nvidia');
+    if (!nvidiaCandidate) {
+      throw new Error('Candidate "nvidia" not found in merged results');
+    }
+
+    // Verify expected structure and Truth Anchor declaration
+    if (
+      !nvidiaCandidate.topic ||
+      typeof nvidiaCandidate.score !== 'number' ||
+      typeof nvidiaCandidate.opportunityScore !== 'number' ||
+      !Array.isArray(nvidiaCandidate.sources) ||
+      !Array.isArray(nvidiaCandidate.evidence) ||
+      nvidiaCandidate.isTruthAnchorVerified !== false ||
+      nvidiaCandidate.provenanceStatus !== 'UNVERIFIED_TREND_SIGNAL'
+    ) {
+      throw new Error(`Candidate does not conform to structure or Truth Anchor contract: ${JSON.stringify(nvidiaCandidate)}`);
+    }
+
+    // 5. Velocity calculation is deterministic
+    const fixedNow = new Date('2026-09-11T12:00:00.000Z');
+    const pubDate = '2026-09-11T02:00:00.000Z'; // 10 hours earlier
+    const vel1 = serviceWithMock.calculateVelocity({ viewCount: 100000, publishedAt: pubDate }, fixedNow);
+    const vel2 = serviceWithMock.calculateVelocity({ viewCount: 100000, publishedAt: pubDate }, fixedNow);
+    if (vel1 !== vel2 || vel1 !== 10000) {
+      throw new Error(`Non-deterministic or incorrect velocity calculation: ${vel1} vs ${vel2}`);
+    }
+
+    // 6. Opportunity score is deterministic
+    const score1 = serviceWithMock.scoreOpportunity(5.5, 2000);
+    const score2 = serviceWithMock.scoreOpportunity(5.5, 2000);
+    if (score1 !== score2 || score1 <= 0 || score1 > 100) {
+      throw new Error(`Non-deterministic or out-of-bounds opportunity score: ${score1}`);
+    }
+
+    // 7. Multiple trend sources merge correctly
+    if (!nvidiaCandidate.sources.includes('trending') || !nvidiaCandidate.sources.includes('competitor')) {
+      throw new Error(`Sources were not merged correctly: ${JSON.stringify(nvidiaCandidate.sources)}`);
+    }
+
+    // 8. Empty API response is handled safely
+    const emptyDiscovery = new TrendingTopicDiscovery({
+      getYouTubeClient: () => ({
+        videos: { list: async () => ({ data: { items: [] } }) },
+        search: { list: async () => ({ data: { items: [] } }) }
+      })
+    });
+    const emptyResult = await emptyDiscovery.discoverTrendingTopics();
+    if (emptyResult.trendingTopics.length !== 0 || emptyResult.competitorData.length !== 0) {
+      throw new Error('Empty API response did not yield empty collections safely');
+    }
+
+    // 9. API failure uses existing fallback behavior
+    const failingDiscovery = new TrendingTopicDiscovery({
+      getYouTubeClient: () => ({
+        videos: {
+          list: async () => {
+            throw new Error('API Rate Limit Exceeded');
+          }
+        },
+        search: {
+          list: async () => {
+            throw new Error('API Rate Limit Exceeded');
+          }
+        }
+      })
+    });
+    const fallbackResult = await failingDiscovery.discoverTrendingTopics();
+    if (!Array.isArray(fallbackResult.trendingTopics) || fallbackResult.trendingTopics.length !== 0) {
+      throw new Error('Failing API call did not return safe empty arrays');
+    }
+
+    // 10. ContentStrategyAgent still discovers candidates through the service
+    const agent = new ContentStrategyAgent(null, mockCredentials, {
+      trendingTopicDiscovery: serviceWithMock
+    });
+    await agent.analyzeTrends();
+    if (agent.trendingTopics.length === 0) {
+      throw new Error('ContentStrategyAgent failed to populate trendingTopics from TrendingTopicDiscovery');
+    }
+    const agentNvidia = agent.trendingTopics.find(t => t.topic === 'nvidia');
+    if (!agentNvidia) {
+      throw new Error('ContentStrategyAgent did not receive merged trending candidate');
+    }
+
+    // 11. SemanticDedupService still filters discovered candidates
+    const dedup = new SemanticDedupService();
+    const candidateTopics = [
+      { topic: 'Why Apple Ditched Intel', score: 10 },
+      { topic: 'The Reason Apple Switched From Intel to M-Series', score: 9 }, // Semantic duplicate
+      { topic: 'Nvidia AI Chip Surge', score: 8 }                              // Unique
+    ];
+    const deduped = dedup.filterDuplicates(candidateTopics, []);
+    if (deduped.unique.length !== 2 || deduped.duplicates.length !== 1) {
+      throw new Error(`SemanticDedupService failed to filter discovered candidates: ${JSON.stringify(deduped)}`);
+    }
+
+    this.logger.info('Trending Topic Discovery Service test completed successfully');
   }
 }
 
