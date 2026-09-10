@@ -12,6 +12,7 @@ class ContentStrategyAgent {
     this.trendingTopics = [];
     this.competitorData = [];
     this.contentCalendar = [];
+    this.historicalPerformance = [];
     this.aiTextService = new AITextService(credentials?.credentials || credentials || {});
     this.dedupService = new SemanticDedupService({ db: this.db });
     this.dnaService = new ContentDNAService(this.db);
@@ -276,6 +277,7 @@ class ContentStrategyAgent {
 
       this.logger.info('Using template content strategy generation');
       let dedupResult = null;
+      let selectedCandidate = null;
       if (requestedTopic) {
         topic = requestedTopic;
         const recentTopics = this.getRecentTopics();
@@ -285,9 +287,12 @@ class ContentStrategyAgent {
         }
         angle = await this.generateAngle(topic);
       } else {
+        if (!this.trendingTopics || this.trendingTopics.length === 0) {
+          await this.analyzeTrends();
+        }
         // Select from trending topics
-        const selectedTopic = this.selectOptimalTopic();
-        topic = selectedTopic.topic;
+        selectedCandidate = this.selectOptimalTopic();
+        topic = selectedCandidate.topic;
         angle = await this.generateAngle(topic);
       }
 
@@ -300,10 +305,16 @@ class ContentStrategyAgent {
       // Consult Content DNA learning recommendations if available
       let dnaRecommendation = null;
       try {
-        dnaRecommendation = await this.dnaService.recommendOptimalDNA();
+        dnaRecommendation = typeof this.dnaService.recommendOptimalDNAFromDB === 'function'
+          ? await this.dnaService.recommendOptimalDNAFromDB()
+          : this.dnaService.recommendOptimalDNA();
       } catch (err) {
         this.logger.debug('DNA recommendation unavailable:', err.message);
       }
+
+      // Gather research sources from discovery evidence if available
+      const matchingTrend = (this.trendingTopics || []).find(t => t.topic === topic);
+      const researchSources = selectedCandidate?.evidence || matchingTrend?.evidence || [];
 
       // Generate content calendar entry
       const strategy = {
@@ -315,6 +326,7 @@ class ContentStrategyAgent {
         estimatedViews: this.predictViews(topic),
         bestPublishTime: this.calculateBestPublishTime(),
         competitorAnalysis: this.getCompetitorInsights(topic),
+        researchSources,
         dedupAnalysis: dedupResult,
         dnaRecommendations: dnaRecommendation?.confidence !== 'insufficient_sample' ? dnaRecommendation : null,
         createdAt: new Date().toISOString()
@@ -599,7 +611,7 @@ Avoid fabricated claims and unsupported numbers.`;
     const candidates = uniqueFallbacks.length > 0 ? uniqueFallbacks : fallbackTopics;
     const pick = candidates[Math.floor(Math.random() * candidates.length)];
     this.logger.info(`Template mode: using evergreen topic "${pick}"`);
-    return { topic: pick, score: 1 };
+    return { topic: pick, score: 1, sources: ['evergreen_fallback'], evidence: [] };
   }
 
   getEvergreenFallbackTopics() {
@@ -748,7 +760,7 @@ Avoid fabricated claims and unsupported numbers.`;
 
   getRecentTopics() {
     // Get topics used in last 7 days to avoid repetition
-    return this.historicalPerformance
+    return (this.historicalPerformance || [])
       .filter(content => {
         const contentDate = new Date(content.createdAt);
         const weekAgo = new Date();

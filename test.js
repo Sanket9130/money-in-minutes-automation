@@ -56,6 +56,7 @@ class SystemTest {
       { name: 'Content DNA Learning System', test: () => this.testContentDNALearningSystem() },
       { name: 'Autonomous Daily Topic Selection', test: () => this.testAutonomousDailyTopicSelection() },
       { name: 'Shorts Packaging and Visual Treatments', test: () => this.testPublishingAndPackagingFeatures() },
+      { name: 'Autonomous Closed-Loop Pipeline Integration', test: () => this.testAutonomousClosedLoopPipeline() },
       { name: 'Evergreen Template Topics', test: () => this.testEvergreenTopics() },
       { name: 'Walkthrough Module', test: () => this.testWalkthroughModule() },
       { name: 'Logger System', test: () => this.testLogger() },
@@ -3873,6 +3874,242 @@ class SystemTest {
     }
 
     this.logger.info('Publishing and packaging compatibility test completed successfully');
+  }
+
+  // =========================================================================
+  // AUTONOMOUS CLOSED-LOOP SHORTS PIPELINE INTEGRATION TEST
+  // =========================================================================
+  async testAutonomousClosedLoopPipeline() {
+    const { Database } = require('./database/db');
+    const { ContentStrategyAgent } = require('./agents/content-strategy-agent');
+    const { ProductionManagementAgent } = require('./agents/production-management-agent');
+    const { PublishingSchedulingAgent } = require('./agents/publishing-scheduling-agent');
+    const { SemanticDedupService } = require('./utils/semantic-dedup-service');
+    const { ContentDNAService } = require('./utils/content-dna-service');
+    const { ShortsAnalyticsService } = require('./utils/shorts-analytics-service');
+    const { ProvenanceService } = require('./utils/provenance-service');
+
+    const fs = require('fs').promises;
+    const path = require('path');
+    const os = require('os');
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mim-closed-loop-'));
+    const db = new Database();
+    db.dbPath = path.join(tempDir, 'closed_loop_test.db');
+    await db.initialize();
+
+    try {
+      // 1. TOPIC DISCOVERY → DEDUP → STRATEGY
+      const strategyAgent = new ContentStrategyAgent(db, {});
+      strategyAgent.trendingTopics = [
+        {
+          topic: 'How Nvidia Reached 3 Trillion Valuation',
+          score: 8.5,
+          sources: ['trending_discovery'],
+          evidence: [{ url: 'https://finance.yahoo.com/quote/NVDA', publisher: 'Yahoo Finance', status: 'verified', sourceType: 'official' }]
+        }
+      ];
+
+      const strategy = await strategyAgent.generateContentStrategy();
+      if (!strategy || !strategy.topic) {
+        throw new Error('Pipeline Step 1 failed: Strategy did not produce a topic');
+      }
+      if (!Array.isArray(strategy.researchSources) || strategy.researchSources.length === 0) {
+        throw new Error('Pipeline Step 1 failed: Strategy did not attach research sources from discovery evidence');
+      }
+
+      // 7. DUPLICATE TOPIC IS REJECTED
+      const dedupService = new SemanticDedupService({ db });
+      const duplicateVerdict = dedupService.checkDeduplication(
+        'How Nvidia Reached $3 Trillion Valuation',
+        [strategy.topic]
+      );
+      if (duplicateVerdict.status !== 'duplicate' || duplicateVerdict.verdict !== 'rejected') {
+        throw new Error(`Pipeline Step 7 failed: Duplicate topic was not rejected: ${JSON.stringify(duplicateVerdict)}`);
+      }
+
+      // 2. STRATEGY → PROVENANCE / TRUTH ANCHOR
+      const script = {
+        title: strategy.topic,
+        format: 'short',
+        duration: 35,
+        hook: { text: 'Nvidia is now worth three trillion dollars!' },
+        mainContent: {
+          sections: [
+            { text: 'Nvidia reported over $30 billion in quarterly revenue from AI accelerators.' }
+          ]
+        },
+        claims: [
+          {
+            text: 'Nvidia quarterly revenue exceeds $30 billion',
+            category: 'financial',
+            riskLevel: 'high',
+            status: 'supported',
+            sourceUrls: ['https://finance.yahoo.com/quote/NVDA']
+          }
+        ]
+      };
+
+      const provenanceService = new ProvenanceService(db);
+      const productionId = 'prod_closed_loop_001';
+      const provenance = await provenanceService.initialize(productionId, {
+        strategy,
+        script
+      });
+
+      if (!provenance || !provenance.claims || provenance.claims.length === 0) {
+        throw new Error('Pipeline Step 2 failed: ProvenanceService failed to initialize claims from strategy/script');
+      }
+
+      // 8. UNVERIFIED FINANCIAL CLAIM REMAINS BLOCKED
+      const unverifiedProdId = 'prod_unverified_financial_claim';
+      const unverifiedProduction = {
+        id: unverifiedProdId,
+        strategy: { topic: 'Unverified Revenue' },
+        script: {
+          claims: [
+            { text: 'Company revenue hit 500 Billion dollars', category: 'financial', status: 'unverified' }
+          ]
+        },
+        assets: { audio: { path: 'audio.mp3' } }
+      };
+      await db.saveProductionSnapshot(unverifiedProduction);
+      await provenanceService.initialize(unverifiedProdId, unverifiedProduction);
+      const publishingAgent = new PublishingSchedulingAgent(db, {});
+      publishingAgent.publishQueue = [{ productionId: unverifiedProdId, status: 'scheduled', metadata: {} }];
+      let blockedCaught = false;
+      try {
+        await publishingAgent.publishContent(unverifiedProdId);
+      } catch (err) {
+        if (err.code === 'PROVENANCE_BLOCKED' || err.message.includes('Publishing is blocked')) {
+          blockedCaught = true;
+        } else {
+          throw err;
+        }
+      }
+      if (!blockedCaught) {
+        throw new Error('Pipeline Step 8 failed: Unverified financial claim was not blocked from publishing');
+      }
+
+      // 3. PRODUCTION → CONTENT DNA
+      const productionAgent = new ProductionManagementAgent(db, {});
+      await productionAgent.initialize();
+      const productionData = await productionAgent.processContent({
+        strategy: { ...strategy, format: 'short', contentType: 'short' },
+        script,
+        thumbnail: {},
+        seo: { title: strategy.topic, tags: ['nvidia', 'shorts'] }
+      });
+
+      const dna = await db.getContentDNA(productionData.id);
+      if (!dna || !dna.traits) {
+        throw new Error('Pipeline Step 3 failed: Content DNA profile was not created in database');
+      }
+      if (dna.traits.captionStyle !== 'karaoke_highlight') {
+        throw new Error(`Pipeline Step 3 failed: Expected karaoke_highlight captionStyle, got ${dna.traits.captionStyle}`);
+      }
+
+      // Test duplicate prevention: re-running processContent for same production ID does not duplicate
+      const duplicateDNAExtract = productionAgent.contentDNAService.extractDNA(productionData);
+      await db.saveContentDNA(duplicateDNAExtract);
+      const allDNA = await db.listContentDNA({ limit: 10 });
+      const matches = allDNA.filter(d => d.productionId === productionData.id);
+      if (matches.length > 1) {
+        throw new Error('Pipeline Step 3 failed: Duplicate DNA records created for the same production');
+      }
+
+      // 4. PUBLISHING → LINK YOUTUBE ID TO DNA & 9. PRIVATE-FIRST ENFORCEMENT
+      let insertedPrivacyStatus = null;
+      publishingAgent.youtube = {
+        videos: {
+          insert: async (params) => {
+            insertedPrivacyStatus = params.requestBody?.status?.privacyStatus;
+            return { data: { id: 'yt_shorts_test_123' } };
+          }
+        }
+      };
+
+      const validVideoPath = path.join(tempDir, 'valid_short.mp4');
+      await fs.writeFile(validVideoPath, Buffer.from('mp4 binary test data'));
+
+      const scheduleEntry = {
+        productionId: productionData.id,
+        status: 'ready',
+        publishTime: new Date(Date.now() + 3600000).toISOString(),
+        metadata: {
+          video: { path: validVideoPath },
+          seo: {
+            title: 'How Nvidia Reached $3 Trillion #Shorts',
+            description: 'Financial breakdown of Nvidia revenue growth.',
+            tags: ['nvidia', 'shorts', 'finance']
+          },
+          provenance: {
+            claims: [{ id: 'c1', text: 'Verified claim', status: 'supported' }]
+          },
+          audio: { intentionalSilence: true, silenceReason: 'Test simulation silence override reason for audit', silenceConfirmedAt: new Date().toISOString() }
+        }
+      };
+
+      await publishingAgent.uploadToYouTube(scheduleEntry);
+
+      if (insertedPrivacyStatus !== 'private') {
+        throw new Error(`Pipeline Step 9 failed: Expected private-first publishing, got "${insertedPrivacyStatus}"`);
+      }
+
+      const updatedDNA = await db.getContentDNA(productionData.id);
+      if (!updatedDNA || updatedDNA.videoId !== 'yt_shorts_test_123') {
+        throw new Error(`Pipeline Step 4 failed: YouTube video ID not attached to Content DNA profile (got ${updatedDNA?.videoId})`);
+      }
+
+      // 5. SHORTS ANALYTICS SNAPSHOT RECORDING & 6. UNAVAILABLE METRICS NOT FABRICATED
+      const shortsAnalytics = new ShortsAnalyticsService(db);
+      const partialMetrics = {
+        views: 25000,
+        likes: 1800,
+        comments: 120,
+        averageViewPercentage: null, // intentionally missing (no fabrication allowed)
+        totalWatchMinutes: null,
+        publishedAt: new Date().toISOString()
+      };
+
+      const snapshot = await shortsAnalytics.recordSnapshot(
+        'yt_shorts_test_123',
+        partialMetrics,
+        { productionId: productionData.id, durationSeconds: 35 },
+        '24h'
+      );
+
+      if (snapshot.directMetrics.averageViewPercentage !== null) {
+        throw new Error('Pipeline Step 6 failed: Missing averageViewPercentage was fabricated instead of preserved as null');
+      }
+      if (snapshot.unavailableMetrics?.viewedVsSwipedAway?.available !== false) {
+        throw new Error('Pipeline Step 6 failed: Restricted swipe metric was fabricated instead of marked unavailable');
+      }
+      if (snapshot.directMetrics.views !== 25000) {
+        throw new Error('Pipeline Step 5 failed: Views metric not recorded correctly');
+      }
+
+      // 5. ANALYTICS → DNA LEARNING
+      const contentDNAService = new ContentDNAService(db);
+      const aggregated = await contentDNAService.getAggregatedInsightsFromDB();
+      if (aggregated.totalVideos !== 1) {
+        throw new Error(`Pipeline Step 5 failed: Expected 1 linked video in DB aggregation, got ${aggregated.totalVideos}`);
+      }
+
+      // Sample-size guardrail: with 1 video, recommendOptimalDNA must safely return neutral defaults
+      const recommendation = await contentDNAService.recommendOptimalDNA(aggregated);
+      if (recommendation.confidence !== 'neutral_default' && recommendation.confidence !== 'insufficient_sample') {
+        throw new Error(`Pipeline Step 5 failed: Recommendation did not enforce sample-size guardrail (<3 samples). Confidence: ${recommendation.confidence}`);
+      }
+      if (!recommendation.evidenceNotes.includes('Insufficient empirical Shorts data')) {
+        throw new Error(`Pipeline Step 5 failed: Expected sample guardrail note in recommendation evidenceNotes`);
+      }
+    } finally {
+      await db.close();
+      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.logger.info('Autonomous Closed-Loop Pipeline Integration test completed successfully');
   }
 
   async testEvergreenTopics() {

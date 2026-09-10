@@ -226,16 +226,65 @@ class ContentDNAService {
   }
 
   /**
+   * Retrieves stored Content DNA and connects it with empirical Shorts analytics
+   * snapshots from the database, aggregating traits under statistical sample guardrails.
+   *
+   * @returns {Promise<object>} Aggregated trait performance
+   */
+  async getAggregatedInsightsFromDB() {
+    if (!this.db || typeof this.db.listContentDNA !== 'function') {
+      return { totalVideos: 0, traits: {}, qualifiedTraits: {} };
+    }
+
+    try {
+      const dnaList = await this.db.listContentDNA({ limit: 200 });
+      if (!Array.isArray(dnaList) || dnaList.length === 0) {
+        return { totalVideos: 0, traits: {}, qualifiedTraits: {} };
+      }
+
+      const linked = [];
+      for (const dna of dnaList) {
+        const videoId = dna.videoId;
+        if (!videoId) continue;
+        let snapshot = null;
+        if (typeof this.db.getShortsAnalyticsSnapshot === 'function') {
+          snapshot = await this.db.getShortsAnalyticsSnapshot(videoId, '24h') ||
+                     await this.db.getShortsAnalyticsSnapshot(videoId, '7d') ||
+                     await this.db.getShortsAnalyticsSnapshot(videoId, 'latest');
+        }
+        if (snapshot) {
+          linked.push(this.linkDNAToPerformance(dna, snapshot));
+        }
+      }
+      return this.aggregatePerformanceByTrait(linked, this.minSampleSize);
+    } catch (err) {
+      this.logger.warn(`Could not aggregate Content DNA from database: ${err.message}`);
+      return { totalVideos: 0, traits: {}, qualifiedTraits: {} };
+    }
+  }
+
+  /**
+   * Recommends optimal Content DNA traits for upcoming Shorts production directly from database.
+   *
+   * @param {object} [options] - Channel preferences or fixed options
+   * @returns {Promise<object>} Recommended traits with clear confidence provenance
+   */
+  async recommendOptimalDNAFromDB(options = {}) {
+    const insights = await this.getAggregatedInsightsFromDB();
+    return this.recommendOptimalDNA(insights, options);
+  }
+
+  /**
    * Recommends optimal Content DNA traits for upcoming Shorts production.
    * If empirical data does not meet sample size thresholds, safely returns neutral defaults.
    *
-   * @param {object} aggregatedInsights - Result from aggregatePerformanceByTrait
-   * @param {object} options - Channel preferences or fixed options
+   * @param {object} [aggregatedInsights] - Result from aggregatePerformanceByTrait
+   * @param {object} [options] - Channel preferences or fixed options
    * @returns {object} Recommended traits with clear confidence provenance
    */
   recommendOptimalDNA(aggregatedInsights = {}, options = {}) {
-    const qualified = aggregatedInsights.qualifiedTraits || {};
-    const totalVideos = aggregatedInsights.totalVideos || 0;
+    const qualified = aggregatedInsights?.qualifiedTraits || {};
+    const totalVideos = aggregatedInsights?.totalVideos || 0;
 
     if (totalVideos < this.minSampleSize || Object.keys(qualified).length === 0) {
       return {

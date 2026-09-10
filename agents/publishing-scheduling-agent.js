@@ -247,6 +247,19 @@ class PublishingSchedulingAgent {
     scheduleEntry.youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
     scheduleEntry.error = null;
     await this.db.updateScheduleEntry(scheduleEntry);
+
+    // Phase 2D: Link YouTube ID to Content DNA record if available
+    if (scheduleEntry.productionId && typeof this.db.getContentDNA === 'function') {
+      try {
+        const dna = await this.db.getContentDNA(scheduleEntry.productionId);
+        if (dna && !dna.videoId) {
+          dna.videoId = videoId;
+          await this.db.saveContentDNA(dna);
+        }
+      } catch (dnaErr) {
+        this.logger.debug(`Could not link videoId to Content DNA: ${dnaErr.message}`);
+      }
+    }
     
     // Upload thumbnail
     if (metadata.thumbnail && metadata.thumbnail.path) {

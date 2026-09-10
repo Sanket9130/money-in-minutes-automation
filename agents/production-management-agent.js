@@ -3,6 +3,7 @@ const fs = require('fs').promises;
 const { Logger } = require('../utils/logger');
 const { AIVideoGenerator } = require('../utils/ai-video-generator');
 const { SceneRepairService } = require('../utils/scene-repair-service');
+const { ContentDNAService } = require('../utils/content-dna-service');
 
 class ProductionManagementAgent {
   constructor(db, credentials) {
@@ -13,6 +14,7 @@ class ProductionManagementAgent {
     this.assets = new Map();
     this.aiVideoGenerator = new AIVideoGenerator(credentials, { db });
     this.sceneRepair = new SceneRepairService(db, this.aiVideoGenerator, { logger: this.logger });
+    this.contentDNAService = new ContentDNAService(db);
   }
 
   async initialize() {
@@ -106,6 +108,33 @@ class ProductionManagementAgent {
       // Persist a scene-addressable production manifest for selective review and repair.
       await this.sceneRepair.initializeProduction(productionData, this.aiVideoGenerator.lastVideoResult || {});
 
+      // Phase 2C: Record Content DNA profile for Shorts productions
+      const isShort = productionData.contentType === 'short' ||
+        strategy?.contentType === 'short' ||
+        strategy?.contentType === 'shorts' ||
+        strategy?.format === 'short' ||
+        strategy?.format === 'shorts' ||
+        productionData.aspectRatio === '9:16' ||
+        strategy?.aspectRatio === '9:16';
+
+      if (isShort) {
+        try {
+          const existingDNA = await this.db.getContentDNA(productionId);
+          if (!existingDNA) {
+            const hookResult = this.aiVideoGenerator.lastHookResult;
+            const dnaProfile = this.contentDNAService.extractDNA(productionData, {
+              hookConfig: hookResult ? { variant: hookResult.variant, duration: hookResult.duration } : null,
+              visualStyle: productionData.visualTreatment || 'motion_slideshow',
+              isShort: true
+            });
+            await this.db.saveContentDNA(dnaProfile);
+            productionData.contentDNA = dnaProfile;
+          }
+        } catch (dnaErr) {
+          this.logger.debug(`Content DNA extraction notice: ${dnaErr.message}`);
+        }
+      }
+
       // Mark as ready — or simulated, when no real video could be produced
       const simulated = Boolean(productionData.assets.finalVideo?.simulated);
       if (simulated) {
@@ -140,6 +169,7 @@ class ProductionManagementAgent {
     const ttsScript = this.formatScriptForTTS(script);
     
     // Save script files
+    await fs.mkdir(path.dirname(scriptPath), { recursive: true });
     await fs.writeFile(scriptPath, JSON.stringify(script, null, 2));
     await fs.writeFile(
       scriptPath.replace('.json', '_tts.txt'), 

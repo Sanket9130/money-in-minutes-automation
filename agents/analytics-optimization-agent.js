@@ -140,10 +140,12 @@ class AnalyticsOptimizationAgent {
             totalWatchMinutes: analytics.watchTime?.totalMinutes,
             publishedAt: videoDetails.publishedAt
           };
+          const productionId = context?.productionId ||
+            (typeof this.db.getContentDNAByVideoId === 'function' ? (await this.db.getContentDNAByVideoId(videoId))?.productionId : null);
           const shortsSnapshot = await this.shortsAnalytics.recordSnapshot(
             videoId,
             rawStats,
-            { videoDetails, productionId: context?.productionId, durationSeconds },
+            { videoDetails, productionId, durationSeconds },
             measurementWindow
           );
           performanceReport.shortsAnalyticsSnapshot = shortsSnapshot;
