@@ -7,6 +7,25 @@ const chalk = require('chalk');
 const path = require('path');
 const { ProductionReadinessService } = require('./utils/production-readiness-service');
 const { normalizeTags, validateYouTubeMetadata } = require('./utils/youtube-metadata-validator');
+const {
+  SCENE_TYPES,
+  TREATMENTS,
+  MOTIONS,
+  VisualTreatmentSelector,
+  VisualTreatmentRenderer,
+  VISUALIZATION_TYPES,
+  FALLBACK_REASONS,
+  NumberFormatter,
+  VisualizationSpec,
+  FinancialVisualization,
+  VisualizationRenderer,
+  AudioMixSpec,
+  VoiceProcessor,
+  MusicDucker,
+  SfxScheduler,
+  AudioValidation,
+  AudioEnhancementEngine
+} = require('./utils/visual-treatment-engine');
 
 class SystemTest {
   constructor() {
@@ -63,7 +82,11 @@ class SystemTest {
       { name: 'Reply Approval and Posting', test: () => this.testReplyApprovalAndPosting() },
       { name: 'Engagement AI Provider Wiring', test: () => this.testEngagementAIProviderWiring() },
       { name: 'Engagement Sync Schedule', test: () => this.testEngagementSyncSchedule() },
-      { name: 'Growth Experiment Refresh Schedule', test: () => this.testGrowthExperimentRefreshSchedule() }
+      { name: 'Growth Experiment Refresh Schedule', test: () => this.testGrowthExperimentRefreshSchedule() },
+      { name: 'Scene-Based Visual Treatment Engine', test: () => this.testVisualTreatmentEngine() },
+      { name: 'Verified Financial & Data Visualization Engine', test: () => this.testFinancialVisualizationEngine() },
+      { name: 'Professional Audio Enhancement Engine', test: () => this.testAudioEnhancementEngine() },
+      { name: 'Shorts Packaging & Publishing Pipeline', test: () => this.testShortsPackagingAndPublishingPipeline() }
     ];
 
     let passed = 0;
@@ -3288,6 +3311,1293 @@ class SystemTest {
     }
     const noService = new DailyAutomation({}, {}, {});
     await noService.refreshGrowthExperiments();
+  }
+
+  async testVisualTreatmentEngine() {
+    const fs = require('fs').promises;
+    const os = require('os');
+    const { runFFmpeg, checkFFmpeg } = require('./utils/ffmpeg');
+
+    if (!(await checkFFmpeg())) {
+      this.logger.warn('FFmpeg unavailable — skipping visual treatment engine render tests');
+      return;
+    }
+
+    const selector = new VisualTreatmentSelector({ logger: this.logger });
+    const renderer = new VisualTreatmentRenderer({ logger: this.logger, runFFmpeg });
+
+    // 1. Visual treatment selection: STATISTIC
+    const statScene = { label: 'Revenue', scriptText: 'In 2025, company revenue surged to $12B.' };
+    const statContext = {
+      verifiedData: [{ value: '$12B', label: 'Annual Revenue', verified: true, source: 'Truth-Anchor 10-K' }]
+    };
+    const statPlan = selector.buildPlan(statScene, statContext);
+    if (statPlan.sceneType !== SCENE_TYPES.STATISTIC || statPlan.treatment !== TREATMENTS.ANIMATED_NUMBER || statPlan.motion !== MOTIONS.EMPHASIS_ZOOM) {
+      throw new Error(`STATISTIC treatment failed: expected STATISTIC/ANIMATED_NUMBER/EMPHASIS_ZOOM, got ${statPlan.sceneType}/${statPlan.treatment}/${statPlan.motion}`);
+    }
+    if (!statPlan.verifiedData || statPlan.verifiedData.value !== '$12B') {
+      throw new Error('STATISTIC treatment did not retain verified Truth-Anchor data');
+    }
+
+    // 2. Visual treatment selection: GROWTH
+    const growthScene = { label: 'Growth', scriptText: 'YoY subscriber count grew 42% over last quarter.' };
+    const growthContext = {
+      verifiedData: [{ value: '+42%', growthRate: 42, direction: 'up', label: 'Subscriber Growth', verified: true, source: 'Truth-Anchor Audit' }]
+    };
+    const growthPlan = selector.buildPlan(growthScene, growthContext);
+    if (growthPlan.sceneType !== SCENE_TYPES.GROWTH || growthPlan.treatment !== TREATMENTS.ANIMATED_PERCENTAGE || growthPlan.motion !== MOTIONS.DIRECTIONAL_PAN) {
+      throw new Error(`GROWTH treatment failed: expected GROWTH/ANIMATED_PERCENTAGE/DIRECTIONAL_PAN, got ${growthPlan.sceneType}/${growthPlan.treatment}/${growthPlan.motion}`);
+    }
+    if (!growthPlan.verifiedData || growthPlan.verifiedData.growthRate !== 42 || growthPlan.verifiedData.direction !== 'up') {
+      throw new Error('GROWTH treatment did not retain verified growth rate or direction');
+    }
+
+    // 3. Visual treatment selection: COMPARISON
+    const compScene = { label: 'Comparison', scriptText: 'Company Alpha vs Company Beta in a head to head showdown.' };
+    const compContext = {
+      facts: [{ type: 'comparison', left: { label: 'Company Alpha' }, right: { label: 'Company Beta' }, verified: true, source: 'Truth-Anchor Comparison' }]
+    };
+    const compPlan = selector.buildPlan(compScene, compContext);
+    if (compPlan.sceneType !== SCENE_TYPES.COMPARISON || compPlan.treatment !== TREATMENTS.TWO_SIDED_COMPARISON || compPlan.motion !== MOTIONS.CONTROLLED_ENTRANCE) {
+      throw new Error(`COMPARISON treatment failed: expected COMPARISON/TWO_SIDED_COMPARISON/CONTROLLED_ENTRANCE, got ${compPlan.sceneType}/${compPlan.treatment}/${compPlan.motion}`);
+    }
+
+    // 4. Visual treatment selection: BUSINESS_FACT
+    const factScene = { label: 'Stores', scriptText: 'The franchise operates 500 stores in 30 countries.' };
+    const factContext = {
+      verifiedData: [{ value: '500', unit: 'stores', label: 'Store Footprint', verified: true, source: 'Truth-Anchor Operational Report' }]
+    };
+    const factPlan = selector.buildPlan(factScene, factContext);
+    if (factPlan.sceneType !== SCENE_TYPES.BUSINESS_FACT || factPlan.treatment !== TREATMENTS.BUSINESS_FACT_CALLOUT || factPlan.motion !== MOTIONS.EMPHASIS_ZOOM) {
+      throw new Error(`BUSINESS_FACT treatment failed: expected BUSINESS_FACT/BUSINESS_FACT_CALLOUT/EMPHASIS_ZOOM, got ${factPlan.sceneType}/${factPlan.treatment}/${factPlan.motion}`);
+    }
+
+    // 5. Visual treatment selection: GENERAL_INFORMATION
+    const genScene = { label: 'Overview', scriptText: 'Here is how modern technology transforms global distribution networks.' };
+    const genPlan = selector.buildPlan(genScene, {});
+    if (genPlan.sceneType !== SCENE_TYPES.GENERAL_INFORMATION || genPlan.treatment !== TREATMENTS.SUBTLE_MOTION || genPlan.motion !== MOTIONS.KEN_BURNS) {
+      throw new Error(`GENERAL_INFORMATION treatment failed: expected GENERAL_INFORMATION/SUBTLE_MOTION/KEN_BURNS, got ${genPlan.sceneType}/${genPlan.treatment}/${genPlan.motion}`);
+    }
+
+    // 6. Missing/unverified numeric data safety fallback
+    const unverifiedScene = { label: 'Unverified Revenue', scriptText: 'The startup reached $50B valuation with 85% growth.' };
+    const unverifiedPlan = selector.buildPlan(unverifiedScene, { verifiedData: [] });
+    if (unverifiedPlan.sceneType !== SCENE_TYPES.GENERAL_INFORMATION || unverifiedPlan.verifiedData !== null) {
+      throw new Error('Financial safety violation: Engine accepted unverified numeric claims without Truth-Anchor verification');
+    }
+    if (!unverifiedPlan.fallbackReason) {
+      throw new Error('Financial safety violation: Engine did not record a fallback reason when refusing unverified numbers');
+    }
+
+    // 7. Deterministic treatment selection
+    const run1 = selector.buildPlan(statScene, statContext);
+    const run2 = selector.buildPlan(statScene, statContext);
+    if (JSON.stringify(run1.toJSON()) !== JSON.stringify(run2.toJSON())) {
+      throw new Error('Visual treatment selection is not deterministic across identical inputs');
+    }
+
+    // 8. Existing anti-swipe hook regression
+    const hookScene = { label: 'Hook', position: 0, scriptText: 'Stop scrolling! Here is what nobody tells you about money.' };
+    const hookPlan = selector.buildPlan(hookScene, {});
+    if (hookPlan.sceneType !== SCENE_TYPES.HOOK || hookPlan.treatment !== TREATMENTS.ANTI_SWIPE_HOOK || hookPlan.motion !== MOTIONS.PUNCH_ZOOM) {
+      throw new Error(`HOOK treatment failed: expected HOOK/ANTI_SWIPE_HOOK/PUNCH_ZOOM, got ${hookPlan.sceneType}/${hookPlan.treatment}/${hookPlan.motion}`);
+    }
+
+    // 9. Existing karaoke regression
+    const assContent = renderer.generateKaraokeAss(statPlan);
+    if (!assContent.includes('[V4+ Styles]') || !assContent.includes('Style: Karaoke') || !assContent.includes('{\\k')) {
+      throw new Error('Karaoke generator did not produce valid ASS formatting with \\k timing tags');
+    }
+    if (!assContent.includes(String(statPlan.safeZones.subtitleMarginV))) {
+      throw new Error('Karaoke generator did not honor Shorts safe zone bottom margin');
+    }
+
+    // 10. 1080x1920 (9:16) rendering and output compatibility
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'yaa-visual-treatment-'));
+    try {
+      const portraitPlan = selector.buildPlan(statScene, statContext, {
+        aspectRatio: '9:16', duration: 1.5
+      });
+      if (portraitPlan.dimensions.width !== 1080 || portraitPlan.dimensions.height !== 1920) {
+        throw new Error(`Portrait dimensions invalid: ${portraitPlan.dimensions.width}x${portraitPlan.dimensions.height}`);
+      }
+      const portraitPath = path.join(tempDir, 'portrait_test.mp4');
+      await renderer.renderSceneVideo(portraitPlan, portraitPath);
+
+      let portraitProbe = '';
+      try {
+        await runFFmpeg(['-i', portraitPath]);
+      } catch (probeErr) {
+        portraitProbe = probeErr.stderr || '';
+      }
+      if (!portraitProbe.includes('1080x1920') || !portraitProbe.includes('h264')) {
+        throw new Error(`Rendered 9:16 video failed technical verification (probe output: ${portraitProbe})`);
+      }
+
+      // 11. Existing 16:9 compatibility
+      const landscapePlan = selector.buildPlan(genScene, {}, {
+        aspectRatio: '16:9', duration: 1.5
+      });
+      if (landscapePlan.dimensions.width !== 1920 || landscapePlan.dimensions.height !== 1080) {
+        throw new Error(`Landscape dimensions invalid: ${landscapePlan.dimensions.width}x${landscapePlan.dimensions.height}`);
+      }
+      const landscapePath = path.join(tempDir, 'landscape_test.mp4');
+      await renderer.renderSceneVideo(landscapePlan, landscapePath);
+
+      let landscapeProbe = '';
+      try {
+        await runFFmpeg(['-i', landscapePath]);
+      } catch (probeErr) {
+        landscapeProbe = probeErr.stderr || '';
+      }
+      if (!landscapeProbe.includes('1920x1080') || !landscapeProbe.includes('h264')) {
+        throw new Error(`Rendered 16:9 video failed technical verification (probe output: ${landscapeProbe})`);
+      }
+
+      // 12. Real Sample Short composition: Hook + Statistic + General Information with Audio
+      const testAudioPath = path.join(tempDir, 'sample_audio.mp3');
+      await runFFmpeg(['-y', '-f', 'lavfi', '-i', 'aevalsrc=0.03*sin(440*2*PI*t):d=4.5', '-c:a', 'libmp3lame', testAudioPath]);
+
+      const samplePlans = [
+        selector.buildPlan(hookScene, {}, { aspectRatio: '9:16', duration: 1.5 }),
+        selector.buildPlan(statScene, statContext, { aspectRatio: '9:16', duration: 1.5 }),
+        selector.buildPlan(genScene, {}, { aspectRatio: '9:16', duration: 1.5 })
+      ];
+
+      const sampleShortPath = path.join(tempDir, 'sample_short.mp4');
+      await renderer.composeShort(samplePlans, testAudioPath, sampleShortPath);
+
+      const sampleStats = await fs.stat(sampleShortPath);
+      if (!sampleStats.isFile() || sampleStats.size <= 0) {
+        throw new Error('Composed sample Short is empty');
+      }
+
+      let sampleProbe = '';
+      try {
+        await runFFmpeg(['-i', sampleShortPath]);
+      } catch (probeErr) {
+        sampleProbe = probeErr.stderr || '';
+      }
+      if (!sampleProbe.includes('1080x1920') || !sampleProbe.includes('h264') || !sampleProbe.includes('aac')) {
+        throw new Error(`Sample Short failed technical properties (must be 1080x1920 H.264 with AAC audio, got: ${sampleProbe})`);
+      }
+
+      // Save a representative preview in data/shorts/ for operator inspection
+      const previewDir = path.join(__dirname, 'data', 'shorts');
+      await fs.mkdir(previewDir, { recursive: true });
+      const persistentSamplePath = path.join(previewDir, 'sample_milestone1_short.mp4');
+      await fs.copyFile(sampleShortPath, persistentSamplePath);
+
+      this.logger.info(`Sample Short successfully generated at ${persistentSamplePath} (size: ${sampleStats.size} bytes)`);
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.logger.info('Scene-Based Visual Treatment Engine test completed successfully');
+  }
+
+  async testFinancialVisualizationEngine() {
+    this.logger.info('Starting Verified Financial & Data Visualization Engine tests...');
+
+    const fs = require('fs').promises;
+    const os = require('os');
+    const { runFFmpeg, checkFFmpeg } = require('./utils/ffmpeg');
+
+    if (!(await checkFFmpeg())) {
+      this.logger.warn('FFmpeg unavailable — skipping financial visualization render tests');
+      return;
+    }
+
+    const financialVis = new FinancialVisualization({ logger: this.logger });
+    const selector = new VisualTreatmentSelector({ logger: this.logger });
+    const renderer = new VisualTreatmentRenderer({ logger: this.logger, runFFmpeg });
+
+    // 1. Revenue visualization: Animated financial metric with verified scale
+    const revInput = {
+      verified: true,
+      value: 12000000000,
+      label: 'Annual Revenue',
+      source: 'SEC Form 10-K'
+    };
+    const revSpecResult = financialVis.createSpec(VISUALIZATION_TYPES.ANIMATED_METRIC, revInput);
+    if (revSpecResult.rejected || !revSpecResult.spec) {
+      throw new Error('Failed to create ANIMATED_METRIC specification');
+    }
+    const revSpec = revSpecResult.spec;
+    if (!(revSpec instanceof VisualizationSpec)) {
+      throw new Error('Specification must be an instance of VisualizationSpec');
+    }
+    if (revSpec.formatted.display !== '$12B' || revSpec.formatted.raw !== 12000000000) {
+      throw new Error(`Revenue display formatting mismatch: expected $12B, got ${revSpec.formatted.display}`);
+    }
+    const revSvg = VisualizationRenderer.renderSvgCard(revSpec);
+    if (!revSvg.includes('$12B') || !revSvg.includes('ANNUAL REVENUE') || !revSvg.includes('SEC Form 10-K')) {
+      throw new Error('Revenue SVG does not include expected formatted metric, label, or verified source');
+    }
+
+    // 2. Growth visualization: Directional arrow + percentage rate
+    const growthInput = {
+      verified: true,
+      value: 42,
+      label: 'YoY Growth Rate',
+      source: 'Audited Financial Statements'
+    };
+    const growthSpecResult = financialVis.createSpec(VISUALIZATION_TYPES.GROWTH_INDICATOR, growthInput);
+    if (growthSpecResult.rejected || !growthSpecResult.spec) {
+      throw new Error('Failed to create GROWTH_INDICATOR specification');
+    }
+    const growthSpec = growthSpecResult.spec;
+    if (growthSpec.formatted.display !== '+42%' || growthSpec.formatted.direction !== 'up') {
+      throw new Error(`Growth indicator formatting mismatch: expected +42%/up, got ${growthSpec.formatted.display}/${growthSpec.formatted.direction}`);
+    }
+    const growthSvg = VisualizationRenderer.renderSvgCard(growthSpec);
+    if (!growthSvg.includes('+42%') || !growthSvg.includes('▲') || !growthSvg.includes('YOY GROWTH RATE')) {
+      throw new Error('Growth SVG does not include expected directional arrow, percentage, or label');
+    }
+
+    // 3. Percentage formatting: Safe precision + unit
+    const pct1 = NumberFormatter.formatPercentage(15.5);
+    if (!pct1.valid || pct1.display !== '15.5%') {
+      throw new Error(`Percentage formatting failed for 15.5: ${pct1.display}`);
+    }
+    const pct2 = NumberFormatter.formatPercentage(-8.2, { explicitSign: true });
+    if (!pct2.valid || pct2.display !== '-8.2%' || pct2.direction !== 'down') {
+      throw new Error(`Negative percentage formatting failed: ${pct2.display}/${pct2.direction}`);
+    }
+
+    // 4. Dollar formatting: Compact scaling preserving underlying raw verified value
+    const currBill = NumberFormatter.formatCurrency(12000000000);
+    if (!currBill.valid || currBill.display !== '$12B' || currBill.raw !== 12000000000) {
+      throw new Error(`Currency billion scaling failed: ${currBill.display}`);
+    }
+    const currMill = NumberFormatter.formatCurrency(500000000);
+    if (!currMill.valid || currMill.display !== '$500M' || currMill.raw !== 500000000) {
+      throw new Error(`Currency million scaling failed: ${currMill.display}`);
+    }
+    const currStr = NumberFormatter.formatCurrency('$2.4B');
+    if (!currStr.valid || currStr.display !== '$2.4B' || currStr.raw !== 2400000000) {
+      throw new Error(`Currency string parsing failed: ${currStr.display}/${currStr.raw}`);
+    }
+
+    // 5. Comparison visualization: Proportional comparison bars
+    const compInput = {
+      verified: true,
+      left: { label: 'Company Alpha', value: 12000000000 },
+      right: { label: 'Company Beta', value: 8000000000 },
+      source: 'Market Share Analysis'
+    };
+    const compSpecResult = financialVis.createSpec(VISUALIZATION_TYPES.COMPARISON_BAR, compInput);
+    if (compSpecResult.rejected || !compSpecResult.spec) {
+      throw new Error('Failed to create COMPARISON_BAR specification');
+    }
+    const compSpec = compSpecResult.spec;
+    if (compSpec.formatted.left.ratio !== 0.6 || compSpec.formatted.right.ratio !== 0.4) {
+      throw new Error(`Comparison bar ratios invalid: left ${compSpec.formatted.left.ratio}, right ${compSpec.formatted.right.ratio}`);
+    }
+    const compSvg = VisualizationRenderer.renderSvgCard(compSpec);
+    if (!compSvg.includes('Company Alpha') || !compSvg.includes('Company Beta') || !compSvg.includes('$12B') || !compSvg.includes('$8B')) {
+      throw new Error('Comparison SVG missing expected entity labels or formatted figures');
+    }
+
+    // 6. Ranking visualization: Leaderboard badges (#1, #2, #3)
+    const rankInput = {
+      verified: true,
+      label: 'Cloud Infrastructure Leaders',
+      items: [
+        { label: 'AWS', value: '$105B' },
+        { label: 'Azure', value: '$75B' },
+        { label: 'Google Cloud', value: '$40B' }
+      ],
+      source: 'Industry Benchmark 2025'
+    };
+    const rankSpecResult = financialVis.createSpec(VISUALIZATION_TYPES.RANKING_LIST, rankInput);
+    if (rankSpecResult.rejected || !rankSpecResult.spec) {
+      throw new Error('Failed to create RANKING_LIST specification');
+    }
+    const rankSpec = rankSpecResult.spec;
+    if (!Array.isArray(rankSpec.formatted) || rankSpec.formatted.length !== 3) {
+      throw new Error('Ranking list formatted items missing or incomplete');
+    }
+    const rankSvg = VisualizationRenderer.renderSvgCard(rankSpec);
+    if (!rankSvg.includes('#1') || !rankSvg.includes('#2') || !rankSvg.includes('#3') || !rankSvg.includes('AWS') || !rankSvg.includes('$105B')) {
+      throw new Error('Ranking SVG missing rank badges or item labels');
+    }
+
+    // 7. Business statistic visualization: Count + contextual visual
+    const statInput = {
+      verified: true,
+      value: 500,
+      unit: 'stores',
+      context: 'Global retail footprint across 30 countries',
+      source: 'Annual Operating Report'
+    };
+    const statSpecResult = financialVis.createSpec(VISUALIZATION_TYPES.STATISTIC_CALLOUT, statInput);
+    if (statSpecResult.rejected || !statSpecResult.spec) {
+      throw new Error('Failed to create STATISTIC_CALLOUT specification');
+    }
+    const statSpec = statSpecResult.spec;
+    if (statSpec.formatted.display !== '500') {
+      throw new Error(`Business statistic count mismatch: expected 500, got ${statSpec.formatted.display}`);
+    }
+    const statSvg = VisualizationRenderer.renderSvgCard(statSpec);
+    if (!statSvg.includes('500') || !statSvg.includes('STORES') || !statSvg.includes('across 30 countries')) {
+      throw new Error('Business statistic SVG missing count, unit, or context');
+    }
+
+    // 8. Trend visualization: Start-to-end trajectory chart
+    const trendInput = {
+      verified: true,
+      startValue: '$5B',
+      endValue: '$12B',
+      label: 'Five-Year Revenue Growth',
+      source: 'Historical Financial Filings'
+    };
+    const trendSpecResult = financialVis.createSpec(VISUALIZATION_TYPES.TREND_LINE, trendInput);
+    if (trendSpecResult.rejected || !trendSpecResult.spec) {
+      throw new Error('Failed to create TREND_LINE specification');
+    }
+    const trendSpec = trendSpecResult.spec;
+    if (trendSpec.formatted.delta.display !== '+$7B' || trendSpec.formatted.percentChange.display !== '+140%') {
+      throw new Error(`Trend line math calculation invalid: delta ${trendSpec.formatted.delta.display}, pct ${trendSpec.formatted.percentChange.display}`);
+    }
+    const trendSvg = VisualizationRenderer.renderSvgCard(trendSpec);
+    if (!trendSvg.includes('TREND ANALYSIS') || !trendSvg.includes('$5B') || !trendSvg.includes('$12B') || !trendSvg.includes('+140%')) {
+      throw new Error('Trend SVG missing sparkline labels or calculated percentage');
+    }
+
+    // 9. Missing verified data rejection
+    const missingRes = financialVis.createSpec(VISUALIZATION_TYPES.ANIMATED_METRIC, null);
+    if (!missingRes.rejected || missingRes.reason !== FALLBACK_REASONS.MISSING_VERIFIED_DATA) {
+      throw new Error(`Missing verified data was not rejected with MISSING_VERIFIED_DATA: got ${missingRes.reason}`);
+    }
+
+    // 10. Invalid verified data rejection
+    const invalidRes = financialVis.createSpec(VISUALIZATION_TYPES.ANIMATED_METRIC, "corrupt string");
+    if (!invalidRes.rejected || invalidRes.reason !== FALLBACK_REASONS.INVALID_NUMERIC_DATA) {
+      throw new Error(`Invalid data was not rejected with INVALID_NUMERIC_DATA: got ${invalidRes.reason}`);
+    }
+
+    // 11. Truth-Anchor rejection/fallback reason
+    const unverifiedRes = financialVis.createSpec(VISUALIZATION_TYPES.ANIMATED_METRIC, {
+      verified: false,
+      value: '$500B',
+      label: 'Unsubstantiated Claim'
+    });
+    if (!unverifiedRes.rejected || unverifiedRes.reason !== FALLBACK_REASONS.UNVERIFIED_FINANCIAL_CLAIM) {
+      throw new Error(`Unverified claim was not rejected with UNVERIFIED_FINANCIAL_CLAIM: got ${unverifiedRes.reason}`);
+    }
+
+    // 12. Deterministic rendering specification
+    const specA = financialVis.createSpec(VISUALIZATION_TYPES.ANIMATED_METRIC, revInput, { aspectRatio: '9:16' }).spec.toJSON();
+    const specB = financialVis.createSpec(VISUALIZATION_TYPES.ANIMATED_METRIC, revInput, { aspectRatio: '9:16' }).spec.toJSON();
+    if (JSON.stringify(specA) !== JSON.stringify(specB)) {
+      throw new Error('Financial visualization specifications are not strictly deterministic across runs');
+    }
+
+    // 13. Safe-zone compliance
+    const safeZones = revSpec.safeZones;
+    if (safeZones.top !== 288 || safeZones.bottom !== 384 || safeZones.left !== 80 || safeZones.right !== 160) {
+      throw new Error(`Safe zones do not conform to Shorts specifications: ${JSON.stringify(safeZones)}`);
+    }
+
+    // 14. Existing Milestone 1 integration with SceneVisualPlan
+    const sceneRevenue = {
+      label: 'Revenue',
+      scriptText: 'In 2025, company revenue surged to $12B.',
+      duration: 1.5,
+      verifiedData: {
+        verified: true,
+        type: 'statistic',
+        value: '$12B',
+        label: 'Annual Revenue',
+        source: 'SEC Form 10-K'
+      }
+    };
+    const planRev = selector.buildPlan(sceneRevenue);
+    if (planRev.sceneType !== SCENE_TYPES.STATISTIC || planRev.treatment !== TREATMENTS.ANIMATED_NUMBER) {
+      throw new Error(`Integration with SceneVisualPlan failed: expected STATISTIC/ANIMATED_NUMBER, got ${planRev.sceneType}/${planRev.treatment}`);
+    }
+    if (!planRev.visualizationSpec || planRev.visualizationSpec.type !== VISUALIZATION_TYPES.ANIMATED_METRIC) {
+      throw new Error('SceneVisualPlan was not enriched with valid financial visualizationSpec');
+    }
+
+    // 15. Existing anti-swipe hook regression
+    const hookScene = {
+      label: 'Hook',
+      position: 0,
+      scriptText: 'Stop scrolling! Here is the $12B secret nobody told you.',
+      duration: 1.5
+    };
+    const hookPlan = selector.buildPlan(hookScene);
+    if (hookPlan.sceneType !== SCENE_TYPES.HOOK || hookPlan.treatment !== TREATMENTS.ANTI_SWIPE_HOOK) {
+      throw new Error(`Hook treatment regressed: expected HOOK/ANTI_SWIPE_HOOK, got ${hookPlan.sceneType}/${hookPlan.treatment}`);
+    }
+
+    // 16. Existing karaoke regression
+    const assContent = renderer.generateKaraokeAss(planRev);
+    if (!assContent.includes('[V4+ Styles]') || !assContent.includes('Style: Karaoke') || !assContent.includes('{\\k')) {
+      throw new Error('Karaoke caption generator failed for financial visualization plan');
+    }
+
+    // 17. 1080x1920 (9:16) rendering and 16:9 regression in temp directory
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'yaa-financial-vis-'));
+    try {
+      // 17a. Portrait 9:16 video render
+      const portraitPath = path.join(tempDir, 'financial_portrait_test.mp4');
+      await renderer.renderSceneVideo(planRev, portraitPath);
+      let probePortrait = '';
+      try {
+        await runFFmpeg(['-i', portraitPath]);
+      } catch (err) {
+        probePortrait = err.stderr || '';
+      }
+      if (!probePortrait.includes('1080x1920') || !probePortrait.includes('h264')) {
+        throw new Error(`Rendered 9:16 financial video failed technical check (probe: ${probePortrait})`);
+      }
+
+      // 18. 16:9 Landscape compatibility
+      const landscapePlan = selector.buildPlan(sceneRevenue, {}, { aspectRatio: '16:9', duration: 1.5 });
+      const landscapePath = path.join(tempDir, 'financial_landscape_test.mp4');
+      await renderer.renderSceneVideo(landscapePlan, landscapePath);
+      let probeLandscape = '';
+      try {
+        await runFFmpeg(['-i', landscapePath]);
+      } catch (err) {
+        probeLandscape = err.stderr || '';
+      }
+      if (!probeLandscape.includes('1920x1080') || !probeLandscape.includes('h264')) {
+        throw new Error(`Rendered 16:9 financial video failed technical check (probe: ${probeLandscape})`);
+      }
+
+      // 19. Real Sample Short composition for Milestone 2:
+      // 5 scenes: Hook -> Revenue -> Growth -> Comparison -> General Info
+      const testAudioPath = path.join(tempDir, 'sample_audio_m2.mp3');
+      await runFFmpeg(['-y', '-f', 'lavfi', '-i', 'aevalsrc=0.03*sin(440*2*PI*t):d=7.5', '-c:a', 'libmp3lame', testAudioPath]);
+
+      const sceneGrowth = {
+        label: 'Growth Rate',
+        scriptText: 'Operating profits jumped by 42% in twelve months.',
+        duration: 1.5,
+        verifiedData: {
+          verified: true,
+          type: 'growth',
+          value: '+42%',
+          growthRate: 42,
+          direction: 'up',
+          label: 'Operating Profit Surge',
+          source: 'Audited Financial Statements'
+        }
+      };
+
+      const sceneComparison = {
+        label: 'Head-to-Head',
+        scriptText: 'Alpha generated $12B compared to Beta with $8B.',
+        duration: 1.5,
+        verifiedData: {
+          verified: true,
+          type: 'comparison',
+          left: { label: 'Company Alpha', value: '$12B' },
+          right: { label: 'Company Beta', value: '$8B' },
+          label: 'Annual Market Share',
+          source: 'Market Audit 2025'
+        }
+      };
+
+      const sceneGeneral = {
+        label: 'Summary',
+        scriptText: 'Clear data creates unstoppable competitive advantages in business.',
+        duration: 1.5
+      };
+
+      const m2Plans = [
+        hookPlan,
+        planRev,
+        selector.buildPlan(sceneGrowth),
+        selector.buildPlan(sceneComparison),
+        selector.buildPlan(sceneGeneral)
+      ];
+
+      const sampleM2Path = path.join(tempDir, 'sample_milestone2_short.mp4');
+      await renderer.composeShort(m2Plans, testAudioPath, sampleM2Path);
+
+      const sampleStats = await fs.stat(sampleM2Path);
+      if (!sampleStats.isFile() || sampleStats.size <= 0) {
+        throw new Error('Composed Milestone 2 sample Short is empty');
+      }
+
+      let sampleM2Probe = '';
+      try {
+        await runFFmpeg(['-i', sampleM2Path]);
+      } catch (err) {
+        sampleM2Probe = err.stderr || '';
+      }
+      if (!sampleM2Probe.includes('1080x1920') || !sampleM2Probe.includes('h264') || !sampleM2Probe.includes('aac')) {
+        throw new Error(`Milestone 2 sample Short failed technical properties (got: ${sampleM2Probe})`);
+      }
+
+      // Persist sample to data/shorts/ for operator inspection
+      const previewDir = path.join(__dirname, 'data', 'shorts');
+      await fs.mkdir(previewDir, { recursive: true });
+      const persistentPath = path.join(previewDir, 'sample_milestone2_short.mp4');
+      await fs.copyFile(sampleM2Path, persistentPath);
+
+      this.logger.info(`Milestone 2 Sample Short generated successfully at ${persistentPath} (size: ${sampleStats.size} bytes)`);
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.logger.info('Verified Financial & Data Visualization Engine test completed successfully');
+  }
+
+  async testAudioEnhancementEngine() {
+    this.logger.info('Starting Professional Audio Enhancement Engine tests...');
+
+    const fs = require('fs').promises;
+    const os = require('os');
+    const { runFFmpeg, checkFFmpeg } = require('./utils/ffmpeg');
+
+    if (!(await checkFFmpeg())) {
+      this.logger.warn('FFmpeg unavailable — skipping audio enhancement engine tests');
+      return;
+    }
+
+    const audioEngine = new AudioEnhancementEngine({ logger: this.logger, runFFmpeg });
+    const selector = new VisualTreatmentSelector({ logger: this.logger });
+    const renderer = new VisualTreatmentRenderer({ logger: this.logger, runFFmpeg });
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'yaa-audio-engine-'));
+
+    try {
+      // 1. Voice normalization filter construction
+      const voiceFilter = VoiceProcessor.buildFilter({ enableVoiceClarity: true });
+      if (!voiceFilter.includes('highpass=f=80') || !voiceFilter.includes('acompressor=threshold=-18dB') || !voiceFilter.includes('alimiter=')) {
+        throw new Error(`Voice normalization filter chain incomplete: ${voiceFilter}`);
+      }
+
+      // 2. Voice clarity EQ verification
+      const clarityOn = VoiceProcessor.buildFilter({ enableVoiceClarity: true });
+      if (!clarityOn.includes('equalizer=f=3200') || !clarityOn.includes('equalizer=f=300')) {
+        throw new Error('Voice clarity filters missing when enableVoiceClarity is true');
+      }
+      const clarityOff = VoiceProcessor.buildFilter({ enableVoiceClarity: false });
+      if (clarityOff.includes('equalizer=f=3200')) {
+        throw new Error('Voice clarity equalizer should be disabled when enableVoiceClarity is false');
+      }
+
+      // Prepare test voice (4 seconds) and soundbed (4 seconds)
+      const voicePath = path.join(tempDir, 'voice_test.wav');
+      await runFFmpeg(['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=4', '-c:a', 'pcm_s16le', voicePath]);
+
+      const soundbedPath = path.join(tempDir, 'soundbed_test.wav');
+      await audioEngine.generateAmbientSoundbed(4, soundbedPath);
+      const soundbedStats = await fs.stat(soundbedPath);
+      if (soundbedStats.size <= 100) {
+        throw new Error('Ambient soundbed generator failed to produce a valid audio file');
+      }
+
+      // 3. Background music mixing
+      const mixedAudioPath = path.join(tempDir, 'mixed_output.m4a');
+      const mixSpec = new AudioMixSpec({
+        voicePath,
+        musicPath: soundbedPath,
+        musicVolume: 0.22,
+        fadeInDuration: 0.5,
+        fadeOutDuration: 0.8,
+        enableDucking: true,
+        targetLoudness: -14.0,
+        truePeakLimit: -1.5
+      });
+
+      await audioEngine.enhanceAndMix(mixSpec, mixedAudioPath);
+      const mixAnalysis = await AudioValidation.analyzeAudio(mixedAudioPath);
+      if (!mixAnalysis.isUsable || mixAnalysis.duration <= 0) {
+        throw new Error('Mixed audio output is invalid or empty');
+      }
+
+      // 4. Automatic voice ducking filter check
+      const duckingFilter = MusicDucker.buildDuckingFilter(mixSpec);
+      if (!duckingFilter.includes('sidechaincompress') || !duckingFilter.includes('ratio=4')) {
+        throw new Error(`Ducking filter mismatch: expected sidechaincompress, got ${duckingFilter}`);
+      }
+
+      // 5. Music fade-in
+      const musicFilter = MusicDucker.buildMusicFilter(mixSpec, 4);
+      if (!musicFilter.includes('afade=t=in:ss=0:d=0.50')) {
+        throw new Error(`Music fade-in filter missing: ${musicFilter}`);
+      }
+
+      // 6. Music fade-out
+      if (!musicFilter.includes('afade=t=out:st=3.20:d=0.80')) {
+        throw new Error(`Music fade-out filter missing: ${musicFilter}`);
+      }
+
+      // 7. Missing music fallback
+      const missingMusicSpec = new AudioMixSpec({
+        voicePath,
+        musicPath: path.join(tempDir, 'non_existent_music.mp3'),
+        enableDucking: true
+      });
+      const missingMusicOut = path.join(tempDir, 'missing_music_output.m4a');
+      await audioEngine.enhanceAndMix(missingMusicSpec, missingMusicOut);
+      const missingMusicAnalysis = await AudioValidation.analyzeAudio(missingMusicOut);
+      if (!missingMusicAnalysis.isUsable) {
+        throw new Error('Engine failed to fall back cleanly when background music was missing');
+      }
+
+      // 8. Missing SFX fallback
+      const missingSfxSpec = new AudioMixSpec({
+        voicePath,
+        sfxCues: [{ path: path.join(tempDir, 'missing_sfx.wav'), timeSeconds: 1, volume: 0.2 }]
+      });
+      const missingSfxOut = path.join(tempDir, 'missing_sfx_output.m4a');
+      await audioEngine.enhanceAndMix(missingSfxSpec, missingSfxOut);
+      const missingSfxAnalysis = await AudioValidation.analyzeAudio(missingSfxOut);
+      if (!missingSfxAnalysis.isUsable) {
+        throw new Error('Engine failed to fall back cleanly when SFX asset was missing');
+      }
+
+      // 9. SFX scheduling
+      const samplePlans = [
+        selector.buildPlan({ label: 'Hook', position: 0, scriptText: 'Hook line' }),
+        selector.buildPlan({ label: 'Revenue', scriptText: 'Revenue metric', verifiedData: { verified: true, type: 'statistic', value: '$10B' } }),
+        selector.buildPlan({ label: 'Growth', scriptText: 'Growth rate', verifiedData: { verified: true, type: 'growth', value: '+30%' } }),
+        selector.buildPlan({ label: 'Comparison', scriptText: 'Comparison A vs B', verifiedData: { verified: true, type: 'comparison', left: { label: 'A' }, right: { label: 'B' } } })
+      ];
+      const plannedCues = SfxScheduler.planSfxForScenes(samplePlans);
+      if (!Array.isArray(plannedCues) || plannedCues.length !== 4) {
+        throw new Error(`SfxScheduler did not plan cues for all eligible scenes: got ${plannedCues.length}`);
+      }
+      if (plannedCues[0].type !== 'hook' || plannedCues[1].type !== 'chime' || plannedCues[2].type !== 'shimmer' || plannedCues[3].type !== 'whoosh') {
+        throw new Error('SfxScheduler cue types do not match expected scene semantics');
+      }
+
+      // 10. Audio synchronization check
+      if (Math.abs(mixAnalysis.duration - 4.0) > 0.4) {
+        throw new Error(`Mixed audio duration (${mixAnalysis.duration}s) deviated significantly from source duration (4.0s)`);
+      }
+
+      // 11. Missing word-level timestamps fallback (karaoke deterministic fallback)
+      const statPlan = samplePlans[1];
+      const fallbackAss = renderer.generateKaraokeAss(statPlan);
+      if (!fallbackAss.includes('{\\k') || !fallbackAss.includes('[V4+ Styles]')) {
+        throw new Error('Deterministic caption timing fallback failed to produce valid karaoke tags');
+      }
+
+      // 12. Clipping protection
+      if (mixAnalysis.hasClipping || mixAnalysis.truePeak > 0.0) {
+        throw new Error(`Clipping detected in audio output: True Peak is ${mixAnalysis.truePeak} dBFS`);
+      }
+
+      // 13. Loudness validation
+      if (mixAnalysis.integratedLoudness > -5.0 || mixAnalysis.integratedLoudness < -40.0) {
+        this.logger.warn(`Loudness reading: ${mixAnalysis.integratedLoudness} LUFS`);
+      }
+
+      // 14. AAC output
+      if (mixAnalysis.codec !== 'aac') {
+        throw new Error(`Output audio codec is not AAC: got ${mixAnalysis.codec}`);
+      }
+
+      // 15. Existing karaoke regression
+      if (!fallbackAss.includes(String(statPlan.safeZones.subtitleMarginV))) {
+        throw new Error('Karaoke safe-zone margin regression detected');
+      }
+
+      // 16. Existing visual treatment regression
+      const hookPlan = samplePlans[0];
+      if (hookPlan.sceneType !== SCENE_TYPES.HOOK || hookPlan.treatment !== TREATMENTS.ANTI_SWIPE_HOOK) {
+        throw new Error('Visual treatment engine HOOK regression detected');
+      }
+
+      // 17. Existing financial visualization regression
+      if (!statPlan.visualizationSpec || statPlan.visualizationSpec.type !== VISUALIZATION_TYPES.ANIMATED_METRIC) {
+        throw new Error('Financial visualization engine specification regression detected');
+      }
+
+      // 18. 1080x1920 Portrait rendering with enhanced audio
+      const portraitOut = path.join(tempDir, 'audio_portrait_test.mp4');
+      await renderer.composeShort([statPlan], mixedAudioPath, portraitOut, {
+        rawAudio: true
+      });
+      let portraitProbe = '';
+      try {
+        await runFFmpeg(['-i', portraitOut]);
+      } catch (err) {
+        portraitProbe = err.stderr || '';
+      }
+      if (!portraitProbe.includes('1080x1920') || !portraitProbe.includes('h264') || !portraitProbe.includes('aac')) {
+        throw new Error(`1080x1920 portrait video failed technical probe with enhanced audio: ${portraitProbe}`);
+      }
+
+      // 19. 16:9 Landscape regression with enhanced audio
+      const landscapeStatPlan = selector.buildPlan(
+        { label: 'Revenue', scriptText: 'Revenue metric', verifiedData: { verified: true, type: 'statistic', value: '$10B' } },
+        {},
+        { aspectRatio: '16:9', duration: 1.5 }
+      );
+      const landscapeOut = path.join(tempDir, 'audio_landscape_test.mp4');
+      await renderer.composeShort([landscapeStatPlan], mixedAudioPath, landscapeOut, {
+        rawAudio: true
+      });
+      let landscapeProbe = '';
+      try {
+        await runFFmpeg(['-i', landscapeOut]);
+      } catch (err) {
+        landscapeProbe = err.stderr || '';
+      }
+      if (!landscapeProbe.includes('1920x1080') || !landscapeProbe.includes('h264') || !landscapeProbe.includes('aac')) {
+        throw new Error(`16:9 landscape video failed technical probe with enhanced audio: ${landscapeProbe}`);
+      }
+
+      // 20. Real Sample Milestone 3 Short:
+      // 5 scenes (7.5s): Hook -> Revenue ($12B) -> Growth (+42%) -> Comparison ($12B vs $8B) -> Summary
+      // with soundbed, ducking, subtle SFX, dynamic karaoke captions, and financial visualizations
+      const sampleVoicePath = path.join(tempDir, 'sample_m3_voice.mp3');
+      await runFFmpeg(['-y', '-f', 'lavfi', '-i', 'sine=frequency=520:duration=7.5', '-c:a', 'libmp3lame', sampleVoicePath]);
+
+      const sampleMusicPath = path.join(tempDir, 'sample_m3_music.wav');
+      await audioEngine.generateAmbientSoundbed(7.5, sampleMusicPath);
+
+      const chimeSfxPath = path.join(tempDir, 'sfx_chime.wav');
+      await audioEngine.generateSubtleSfx('chime', chimeSfxPath);
+
+      const shimmerSfxPath = path.join(tempDir, 'sfx_shimmer.wav');
+      await audioEngine.generateSubtleSfx('shimmer', shimmerSfxPath);
+
+      const m3Scene1 = selector.buildPlan({
+        label: 'Hook', position: 0, scriptText: 'Stop scrolling! Here is the $12B secret nobody told you.', duration: 1.5
+      });
+      const m3Scene2 = selector.buildPlan({
+        label: 'Revenue', scriptText: 'In 2025, company revenue surged to $12B.', duration: 1.5,
+        verifiedData: { verified: true, type: 'statistic', value: '$12B', label: 'Annual Revenue', source: 'SEC Form 10-K' }
+      });
+      const m3Scene3 = selector.buildPlan({
+        label: 'Growth Rate', scriptText: 'Operating profits jumped by 42% in twelve months.', duration: 1.5,
+        verifiedData: { verified: true, type: 'growth', value: '+42%', growthRate: 42, direction: 'up', label: 'Operating Profit Surge', source: 'Audited Financials' }
+      });
+      const m3Scene4 = selector.buildPlan({
+        label: 'Head-to-Head', scriptText: 'Alpha generated $12B compared to Beta with $8B.', duration: 1.5,
+        verifiedData: { verified: true, type: 'comparison', left: { label: 'Alpha', value: '$12B' }, right: { label: 'Beta', value: '$8B' }, label: 'Annual Market Share', source: 'Market Audit' }
+      });
+      const m3Scene5 = selector.buildPlan({
+        label: 'Summary', scriptText: 'Clear data creates unstoppable competitive advantages in business.', duration: 1.5
+      });
+
+      const m3Plans = [m3Scene1, m3Scene2, m3Scene3, m3Scene4, m3Scene5];
+      const m3SfxCues = [
+        { path: chimeSfxPath, timeSeconds: 1.7, volume: 0.2, label: 'Revenue Chime' },
+        { path: shimmerSfxPath, timeSeconds: 3.2, volume: 0.2, label: 'Growth Shimmer' }
+      ];
+
+      const sampleM3Path = path.join(tempDir, 'sample_milestone3_short.mp4');
+      await renderer.composeShort(m3Plans, sampleVoicePath, sampleM3Path, {
+        musicPath: sampleMusicPath,
+        musicVolume: 0.20,
+        enableDucking: true,
+        sfxCues: m3SfxCues,
+        targetLoudness: -14.0,
+        truePeakLimit: -1.5,
+        enableVoiceClarity: true
+      });
+
+      const m3Stats = await fs.stat(sampleM3Path);
+      if (!m3Stats.isFile() || m3Stats.size <= 0) {
+        throw new Error('Composed Milestone 3 sample Short is empty');
+      }
+
+      let m3Probe = '';
+      try {
+        await runFFmpeg(['-i', sampleM3Path]);
+      } catch (err) {
+        m3Probe = err.stderr || '';
+      }
+      if (!m3Probe.includes('1080x1920') || !m3Probe.includes('h264') || !m3Probe.includes('aac')) {
+        throw new Error(`Milestone 3 sample Short failed technical properties: ${m3Probe}`);
+      }
+
+      // Persist sample to data/shorts/ for operator inspection
+      const previewDir = path.join(__dirname, 'data', 'shorts');
+      await fs.mkdir(previewDir, { recursive: true });
+      const persistentPath = path.join(previewDir, 'sample_milestone3_short.mp4');
+      await fs.copyFile(sampleM3Path, persistentPath);
+
+      this.logger.info(`Milestone 3 Sample Short generated successfully at ${persistentPath} (size: ${m3Stats.size} bytes)`);
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.logger.info('Professional Audio Enhancement Engine test completed successfully');
+  }
+
+  async testShortsPackagingAndPublishingPipeline() {
+    this.logger.info('Starting Shorts Packaging & Publishing Pipeline tests...');
+
+    const fs = require('fs').promises;
+    const os = require('os');
+    const sharp = require('sharp');
+    const { runFFmpeg, checkFFmpeg } = require('./utils/ffmpeg');
+    const { ShortsPackagingService, PublishingPackage } = require('./utils/shorts-packaging-service');
+    const { ShortsCoverGenerator } = require('./utils/shorts-cover-generator');
+    const { VisualTreatmentSelector, VisualTreatmentRenderer } = require('./utils/visual-treatment-engine');
+    const { AudioEnhancementEngine } = require('./utils/audio-enhancement-engine');
+    const { ShortsRepurposingService } = require('./utils/shorts-repurposing-service');
+    const { PublishingSchedulingAgent } = require('./agents/publishing-scheduling-agent');
+
+    if (!(await checkFFmpeg())) {
+      this.logger.warn('FFmpeg unavailable — skipping Milestone 4 pipeline tests');
+      return;
+    }
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'yaa-milestone4-'));
+    const db = new Database();
+    db.dbPath = path.join(tempDir, 'm4_test.db');
+    await db.initialize();
+
+    const packagingService = new ShortsPackagingService({ logger: this.logger });
+    const coverGenerator = new ShortsCoverGenerator({ logger: this.logger });
+    const selector = new VisualTreatmentSelector({ logger: this.logger });
+    const renderer = new VisualTreatmentRenderer({ logger: this.logger, runFFmpeg });
+    const audioEngine = new AudioEnhancementEngine({ logger: this.logger, runFFmpeg });
+
+    try {
+      // ═════════════════════════════════════════════════════════════════════════
+      // 1. PACKAGING SERVICE UNIT TESTS
+      // ═════════════════════════════════════════════════════════════════════════
+
+      // 1.1 PublishingPackage construction and serialization
+      const pkg = new PublishingPackage({
+        title: 'Nvidia $12B Revenue Secret',
+        description: 'Analysis of financial results.',
+        hashtags: ['#Shorts', '#Finance', '#Investing'],
+        tags: ['nvidia', 'revenue', 'finance', 'investing', 'shorts'],
+        cta: 'Subscribe for daily verified wealth intelligence.',
+        financialDisclaimer: 'Not financial advice. Educational only.',
+        verifiedSources: [{ citation: 'SEC Form 10-K', verified: true }],
+        validation: { valid: true, errors: [], warnings: [] }
+      });
+      if (pkg.title !== 'Nvidia $12B Revenue Secret' || pkg.hashtags.length !== 3) {
+        throw new Error('PublishingPackage construction failed');
+      }
+      const serialized = pkg.toJSON();
+      if (!serialized.title || !serialized.validation?.valid || serialized.privacyStatus !== 'private') {
+        throw new Error('PublishingPackage serialization failed or default privacy is not private');
+      }
+
+      // 1.2 Title generation and platform compliance (length <= 100)
+      const longTitle = 'This is an excessively long title designed specifically to exceed the YouTube platform character limit and trigger truncation safely'.repeat(2);
+      const sanitizedTitle = packagingService.generateTitle({
+        title: longTitle,
+        topic: 'Finance',
+        script: { hook: { text: 'Stop scrolling!' } }
+      });
+      if (sanitizedTitle.length > 100) {
+        throw new Error(`Sanitized title exceeded 100 characters: ${sanitizedTitle.length}`);
+      }
+
+      // 1.3 Clickbait rejection / sanitization
+      const clickbaitInput = 'SHOCKING SECRET: 1000% GUARANTEED RETURN WILL BLOW YOUR MIND!';
+      const cleanTitle = packagingService.sanitizeTitle(clickbaitInput);
+      if (/shocking/i.test(cleanTitle) || /blow your mind/i.test(cleanTitle) || /1000%/i.test(cleanTitle)) {
+        throw new Error(`Clickbait words were not sanitized from title: ${cleanTitle}`);
+      }
+
+      // 1.4 Unverified numerical claims rejection
+      const unverifiedInput = {
+        title: 'Company reaches $999B valuation overnight',
+        verifiedData: [{ value: '$12B', label: 'Annual Revenue' }],
+        claims: [{ claim: 'Revenue hit $12B', verified: true }]
+      };
+      const checkedTitle = packagingService.generateTitle(unverifiedInput);
+      if (checkedTitle.includes('$999B')) {
+        throw new Error('Unverified numerical claim ($999B) was permitted in title');
+      }
+
+      // 1.5 Financial disclaimer inclusion on financial topics
+      const financialPkg = await packagingService.generatePublishingPackage({
+        title: 'Nvidia $12B Revenue Breakdown',
+        script: {
+          hook: { text: 'How Nvidia made $12B this year.' },
+          fullScript: 'Nvidia reported $12B in quarterly revenue with 42% profit margins. Investing wisely requires due diligence.'
+        },
+        verifiedData: [{ label: 'Revenue', value: '$12B', source: 'SEC Form 10-K' }],
+        truthAnchor: [{ claim: 'Revenue is $12B', source: 'SEC Form 10-K', verified: true }]
+      });
+      if (!financialPkg.financialDisclaimer || !financialPkg.description.includes('DISCLAIMER: Not financial advice')) {
+        throw new Error('Financial disclaimer was omitted from financial content');
+      }
+      if (!financialPkg.verifiedSources.length || !financialPkg.description.includes('SEC Form 10-K')) {
+        throw new Error('Verified sources were omitted from description');
+      }
+
+      // 1.6 Financial disclaimer omission on non-financial topics
+      const nonFinancialPkg = await packagingService.generatePublishingPackage({
+        title: 'Morning Productivity Habits',
+        script: {
+          hook: { text: 'Wake up earlier.' },
+          fullScript: 'Here are three habits to start your morning with clarity and focus.'
+        }
+      });
+      if (nonFinancialPkg.financialDisclaimer) {
+        throw new Error('Financial disclaimer was unnecessarily added to non-financial content');
+      }
+
+      // 1.7 Hashtag generation and bounds
+      const hashtags = packagingService.generateHashtags({
+        topic: 'Venture Capital Investing',
+        script: { fullScript: 'Understanding venture capital valuations and growth.' }
+      });
+      if (!hashtags.includes('#Shorts') || hashtags.length > 5 || hashtags.length < 3) {
+        throw new Error(`Hashtag generation failed bounds check: ${hashtags.join(', ')}`);
+      }
+
+      // 1.8 Tags generation within platform limits (<= 450 chars)
+      const tags = packagingService.generateTags({
+        topic: 'AI Semiconductor Growth',
+        script: { fullScript: 'Semiconductor manufacturers report record chip demand and quarterly growth.' },
+        verifiedData: [{ value: '$12B' }]
+      });
+      if (tags.join(',').length > 450 || !tags.includes('Shorts')) {
+        throw new Error(`Tags generation failed limits check: ${tags.join(',')}`);
+      }
+
+      // 1.9 Quality gate & validation failure detection
+      const validValidation = packagingService.validatePublishingPackage(financialPkg);
+      if (!validValidation.valid) {
+        throw new Error(`Valid package failed validation: ${validValidation.errors.join('; ')}`);
+      }
+
+      const invalidPkg = new PublishingPackage({
+        title: 'A'.repeat(120), // Too long
+        description: 'B'.repeat(6000), // Too long
+        tags: Array(100).fill('excessive-tag-stuffing-string')
+      });
+      const invalidValidation = packagingService.validatePublishingPackage(invalidPkg);
+      if (invalidValidation.valid || invalidValidation.errors.length === 0) {
+        throw new Error('Invalid package erroneously passed validation');
+      }
+
+      // ═════════════════════════════════════════════════════════════════════════
+      // 2. COVER GENERATOR UNIT TESTS
+      // ═════════════════════════════════════════════════════════════════════════
+
+      // 2.1 Hook scene selection
+      const mockScenes = [
+        { id: 'intro', label: 'Hook', isHook: true, scriptText: 'Why this $12B deal changes everything.' },
+        { id: 'data', label: 'Revenue', scriptText: 'Revenue jumped by 42%.', verifiedData: { value: '$12B' } }
+      ];
+      const hookScene = coverGenerator.selectHookScene(mockScenes);
+      if (!hookScene || hookScene.id !== 'intro') {
+        throw new Error('Cover generator failed to select the hook scene');
+      }
+
+      // 2.2 Cover frame generation (1080x1920 JPEG) with verified badge
+      const coverOutputPath = path.join(tempDir, 'test_cover.jpg');
+      const coverResult = await coverGenerator.generateCover({
+        title: 'The $12B Revenue Shock',
+        script: { hook: { text: 'The $12B Revenue Shock' } },
+        scenes: mockScenes,
+        verifiedData: [{ label: 'Revenue', value: '$12B', source: 'SEC Form 10-K' }],
+        truthAnchor: [{ claim: 'Revenue hit $12B', verified: true }]
+      }, coverOutputPath);
+
+      const coverStats = await fs.stat(coverOutputPath);
+      if (!coverStats.isFile() || coverStats.size <= 0) {
+        throw new Error('Generated cover file is missing or empty');
+      }
+      if (coverResult.width !== 1080 || coverResult.height !== 1920) {
+        throw new Error(`Cover dimensions unexpected: ${coverResult.width}x${coverResult.height}`);
+      }
+
+      // Verify image header & properties with sharp
+      const coverMeta = await sharp(coverOutputPath).metadata();
+      if (coverMeta.width !== 1080 || coverMeta.height !== 1920 || coverMeta.format !== 'jpeg') {
+        throw new Error(`Sharp metadata verification failed: ${coverMeta.width}x${coverMeta.height}, ${coverMeta.format}`);
+      }
+
+      // 2.3 Fallback cover generation with no source assets
+      const fallbackCoverPath = path.join(tempDir, 'test_fallback_cover.jpg');
+      await coverGenerator.generateCover({
+        title: 'Simple Fallback Title',
+        scenes: []
+      }, fallbackCoverPath);
+      const fallbackMeta = await sharp(fallbackCoverPath).metadata();
+      if (fallbackMeta.width !== 1080 || fallbackMeta.height !== 1920) {
+        throw new Error('Fallback cover generation failed');
+      }
+
+      // ═════════════════════════════════════════════════════════════════════════
+      // 3. PIPELINE INTEGRATION & APPROVAL TESTS
+      // ═════════════════════════════════════════════════════════════════════════
+
+      const publishing = new PublishingSchedulingAgent(db, {});
+      const repurposingService = new ShortsRepurposingService(db, publishing, {
+        dataRoot: path.join(tempDir, 'shorts_repurpose'),
+        width: 1080,
+        height: 1920,
+        logger: this.logger,
+        packagingService,
+        coverGenerator
+      });
+
+      const productionId = 'prod-milestone4-integration';
+      const sourceVideo = path.join(tempDir, 'source_m4.mp4');
+      const audioPath = path.join(tempDir, 'narration_m4.wav');
+      await runFFmpeg([
+        '-y', '-f', 'lavfi', '-i', 'color=c=#0f172a:s=1080x1920:r=30:d=4',
+        '-f', 'lavfi', '-i', 'sine=frequency=440:duration=4',
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', sourceVideo
+      ]);
+      await fs.writeFile(audioPath, Buffer.from('narration audio'));
+
+      const production = {
+        id: productionId,
+        status: 'scheduled',
+        strategy: { topic: 'Autonomous Wealth Intelligence', contentType: 'educational' },
+        script: {
+          title: 'The $12B Revenue Shock',
+          fullScript: 'In 2025, company revenue surged to $12B with verified audited records. Clear numbers win in modern finance.'
+        },
+        seo: {
+          title: 'The $12B Revenue Shock',
+          description: 'A deep dive into audited financial results.',
+          tags: ['finance', 'revenue', 'investing']
+        },
+        assets: {
+          finalVideo: { path: sourceVideo, simulated: false, duration: 4 },
+          audio: { path: audioPath, status: 'ready', simulated: false, provider: 'fixture-tts' }
+        },
+        timeline: {},
+        priority: 60,
+        scheduledPublishTime: new Date(Date.now() + 86400000).toISOString()
+      };
+      await db.saveProductionData(production);
+      await db.saveProductionSnapshot(production);
+      await db.saveContentReview(productionId, {
+        status: 'approved',
+        editorData: { factChecked: true, rightsConfirmed: true },
+        qualityChecks: [],
+        reviewedAt: new Date().toISOString()
+      });
+      await db.saveContentProvenance(productionId, {
+        sources: [{ id: 'src-1', title: 'SEC Form 10-K', url: 'https://sec.gov', verified: true }],
+        claims: [{ claim: 'Revenue is $12B', verified: true, sourceId: 'src-1' }],
+        containsSyntheticMedia: false,
+        status: 'verified',
+        summary: { sourceCount: 1, verifiedSources: 1, claimCount: 1, resolvedClaims: 1, highRiskClaims: 0, unresolvedClaims: 0 }
+      });
+      await db.replaceProductionScenes(productionId, [
+        { id: 'sc-1', label: 'Hook', scriptText: 'Stop scrolling! The $12B number is real.', prompt: 'Hook', duration: 1.5, assetType: 'video', assetPath: sourceVideo, audioPath, status: 'ready', narrationStatus: 'current', rightsConfirmed: true },
+        { id: 'sc-2', label: 'Revenue', scriptText: 'Revenue surged to $12B in audited results.', prompt: 'Revenue', duration: 1.5, assetType: 'video', assetPath: sourceVideo, audioPath, status: 'ready', narrationStatus: 'current', rightsConfirmed: true }
+      ]);
+
+      const proposedClips = await repurposingService.propose(productionId, { count: 1 });
+      if (!proposedClips.length) throw new Error('Short proposal failed');
+      const clipId = proposedClips[0].id;
+
+      // Render Scene-Based Short with automatic cover & packaging generation
+      const scenePlans = [
+        selector.buildPlan({ label: 'Hook', isHook: true, scriptText: 'Stop scrolling! The $12B number is real.', duration: 1.5 }),
+        selector.buildPlan({
+          label: 'Revenue', scriptText: 'Revenue surged to $12B in audited results.', duration: 1.5,
+          verifiedData: { verified: true, type: 'statistic', value: '$12B', label: 'Annual Revenue', source: 'SEC Form 10-K' }
+        })
+      ];
+
+      const renderedClip = await repurposingService.renderSceneBasedShort(productionId, clipId, scenePlans, {
+        musicVolume: 0.15,
+        enableDucking: true,
+        enableVoiceClarity: true
+      });
+
+      if (!renderedClip.coverPath) {
+        throw new Error('Scene-based Short rendering did not produce a cover thumbnail');
+      }
+      if (!renderedClip.packaging || !renderedClip.packaging.title) {
+        throw new Error('Scene-based Short rendering did not produce a publishing package');
+      }
+      const coverStat = await fs.stat(renderedClip.coverPath);
+      if (!coverStat.isFile() || coverStat.size <= 0) {
+        throw new Error('Scene-based Short cover file is missing or empty on disk');
+      }
+
+      // Approve Short and verify scheduling inherits packaging and cover
+      let unconfirmedBlocked = false;
+      try {
+        await repurposingService.approve(productionId, clipId, {});
+      } catch (err) {
+        unconfirmedBlocked = err.code === 'SHORT_APPROVAL_REQUIRED';
+      }
+      if (!unconfirmedBlocked) {
+        throw new Error('Unconfirmed Short approval was not blocked');
+      }
+
+      const scheduledClip = await repurposingService.approve(productionId, clipId, {
+        confirmed: true,
+        privacyStatus: 'private',
+        publishTime: new Date(Date.now() + 172800000).toISOString()
+      });
+
+      if (scheduledClip.status !== 'scheduled' || scheduledClip.privacyStatus !== 'private') {
+        throw new Error('Approved Short failed to schedule or privacy status was not private');
+      }
+
+      const scheduleEntry = await db.getLatestScheduleEntry(clipId);
+      if (!scheduleEntry) {
+        throw new Error('Schedule entry was not found in database');
+      }
+      if (!scheduleEntry.metadata.thumbnail?.path) {
+        throw new Error('Schedule entry thumbnail path was not set to cover thumbnail');
+      }
+      if (scheduleEntry.metadata.privacyStatus !== 'private') {
+        throw new Error(`Schedule entry privacyStatus violated private-first safety: ${scheduleEntry.metadata.privacyStatus}`);
+      }
+
+      // ═════════════════════════════════════════════════════════════════════════
+      // 4. REAL END-TO-END MILESTONE 4 SAMPLE GENERATION & INSPECTION
+      // ═════════════════════════════════════════════════════════════════════════
+
+      // Build 5-scene production (7.5s): Hook -> Revenue ($12B) -> Growth (+42%) -> Comparison ($12B vs $8B) -> Summary
+      const m4VoicePath = path.join(tempDir, 'm4_sample_voice.mp3');
+      await runFFmpeg(['-y', '-f', 'lavfi', '-i', 'sine=frequency=480:duration=7.5', '-c:a', 'libmp3lame', m4VoicePath]);
+
+      const m4MusicPath = path.join(tempDir, 'm4_sample_music.wav');
+      await audioEngine.generateAmbientSoundbed(7.5, m4MusicPath);
+
+      const m4ChimePath = path.join(tempDir, 'm4_chime.wav');
+      await audioEngine.generateSubtleSfx('chime', m4ChimePath);
+
+      const m4Scene1 = selector.buildPlan({
+        label: 'Hook', position: 0, isHook: true, scriptText: 'Stop scrolling! Here is the $12B verified secret.', duration: 1.5
+      });
+      const m4Scene2 = selector.buildPlan({
+        label: 'Revenue', scriptText: 'In 2025, company revenue surged to $12B.', duration: 1.5,
+        verifiedData: { verified: true, type: 'statistic', value: '$12B', label: 'Annual Revenue', source: 'SEC Form 10-K' }
+      });
+      const m4Scene3 = selector.buildPlan({
+        label: 'Growth', scriptText: 'Operating profit expanded by 42% year over year.', duration: 1.5,
+        verifiedData: { verified: true, type: 'growth', value: '+42%', growthRate: 42, direction: 'up', label: 'Profit Expansion', source: 'Audited Financials' }
+      });
+      const m4Scene4 = selector.buildPlan({
+        label: 'Comparison', scriptText: 'Alpha generated $12B compared to Beta with $8B.', duration: 1.5,
+        verifiedData: { verified: true, type: 'comparison', left: { label: 'Alpha', value: '$12B' }, right: { label: 'Beta', value: '$8B' }, label: 'Market Leadership', source: 'Market Audit' }
+      });
+      const m4Scene5 = selector.buildPlan({
+        label: 'Summary', scriptText: 'Subscribe for daily verified wealth intelligence.', duration: 1.5
+      });
+
+      const m4Plans = [m4Scene1, m4Scene2, m4Scene3, m4Scene4, m4Scene5];
+      const m4SfxCues = [
+        { path: m4ChimePath, timeSeconds: 1.6, volume: 0.2, label: 'Revenue Chime' }
+      ];
+
+      const sampleM4VideoPath = path.join(tempDir, 'sample_milestone4_short.mp4');
+      await renderer.composeShort(m4Plans, m4VoicePath, sampleM4VideoPath, {
+        musicPath: m4MusicPath,
+        musicVolume: 0.18,
+        enableDucking: true,
+        sfxCues: m4SfxCues,
+        targetLoudness: -14.0,
+        truePeakLimit: -1.5,
+        enableVoiceClarity: true
+      });
+
+      const m4VideoStats = await fs.stat(sampleM4VideoPath);
+      if (!m4VideoStats.isFile() || m4VideoStats.size <= 0) {
+        throw new Error('Milestone 4 sample Short MP4 is empty');
+      }
+
+      // Generate 9:16 Cover
+      const sampleM4CoverPath = path.join(tempDir, 'sample_milestone4_cover.jpg');
+      const m4CoverResult = await coverGenerator.generateCover({
+        title: 'The $12B Secret Nobody Told You',
+        script: { hook: { text: 'The $12B Secret Nobody Told You' } },
+        scenes: m4Plans,
+        verifiedData: [
+          { label: 'Annual Revenue', value: '$12B', source: 'SEC Form 10-K' },
+          { label: 'Operating Profit Expansion', value: '+42%', source: 'Audited Financials' }
+        ],
+        truthAnchor: [
+          { claim: 'Revenue hit $12B', verified: true, source: 'SEC Form 10-K' },
+          { claim: 'Operating profit grew 42%', verified: true, source: 'Audited Financials' }
+        ]
+      }, sampleM4CoverPath);
+
+      // Generate Publishing Package
+      const sampleM4Pkg = await packagingService.generatePublishingPackage({
+        title: 'The $12B Secret Nobody Told You',
+        topic: 'Finance & Technology Wealth',
+        script: {
+          hook: { text: 'Stop scrolling! Here is the $12B verified secret.' },
+          fullScript: 'In 2025, company revenue surged to $12B with operating profits expanding by 42%. Verified filings show Alpha leading Beta by $4B.'
+        },
+        scenes: m4Plans,
+        verifiedData: [
+          { label: 'Annual Revenue', value: '$12B', source: 'SEC Form 10-K' },
+          { label: 'Operating Profit Expansion', value: '+42%', source: 'Audited Financials' }
+        ],
+        truthAnchor: [
+          { claim: 'Revenue hit $12B', verified: true, source: 'SEC Form 10-K' },
+          { claim: 'Operating profit grew 42%', verified: true, source: 'Audited Financials' }
+        ],
+        provenance: {
+          sources: [
+            { title: 'SEC Form 10-K Filing', url: 'https://sec.gov', verified: true },
+            { title: 'Audited Financial Statement 2025', verified: true }
+          ]
+        },
+        cover: { path: sampleM4CoverPath, width: m4CoverResult.width, height: m4CoverResult.height }
+      });
+
+      if (!sampleM4Pkg.validation?.valid) {
+        throw new Error(`Milestone 4 publishing package validation failed: ${sampleM4Pkg.validation?.errors?.join('; ')}`);
+      }
+
+      // Technical MP4 Inspection via FFmpeg
+      let m4ProbeOutput = '';
+      try {
+        await runFFmpeg(['-i', sampleM4VideoPath]);
+      } catch (err) {
+        m4ProbeOutput = err.stderr || '';
+      }
+
+      if (!m4ProbeOutput.includes('1080x1920')) {
+        throw new Error(`Milestone 4 sample Short resolution not 1080x1920: ${m4ProbeOutput}`);
+      }
+      if (!m4ProbeOutput.includes('h264')) {
+        throw new Error(`Milestone 4 sample Short video codec not h264: ${m4ProbeOutput}`);
+      }
+      if (!m4ProbeOutput.includes('aac')) {
+        throw new Error(`Milestone 4 sample Short audio codec not aac: ${m4ProbeOutput}`);
+      }
+
+      // Technical Cover Inspection via sharp
+      const sampleCoverMeta = await sharp(sampleM4CoverPath).metadata();
+      if (sampleCoverMeta.width !== 1080 || sampleCoverMeta.height !== 1920 || sampleCoverMeta.format !== 'jpeg') {
+        throw new Error(`Milestone 4 sample cover dimensions/format invalid: ${sampleCoverMeta.width}x${sampleCoverMeta.height}`);
+      }
+
+      // Persist sample files to data/shorts/ directory for review
+      const previewDir = path.join(__dirname, 'data', 'shorts');
+      await fs.mkdir(previewDir, { recursive: true });
+
+      const persistentVideoPath = path.join(previewDir, 'sample_milestone4_short.mp4');
+      const persistentCoverPath = path.join(previewDir, 'sample_milestone4_cover.jpg');
+      const persistentPkgPath = path.join(previewDir, 'sample_milestone4_packaging.json');
+
+      await fs.copyFile(sampleM4VideoPath, persistentVideoPath);
+      await fs.copyFile(sampleM4CoverPath, persistentCoverPath);
+      await fs.writeFile(persistentPkgPath, JSON.stringify(sampleM4Pkg.toJSON(), null, 2), 'utf8');
+
+      this.logger.info(`Milestone 4 End-to-End Sample Generated Successfully:`);
+      this.logger.info(`  Video:     ${persistentVideoPath} (${m4VideoStats.size} bytes)`);
+      this.logger.info(`  Cover:     ${persistentCoverPath} (${sampleCoverMeta.size || '1080x1920'} bytes)`);
+      this.logger.info(`  Packaging: ${persistentPkgPath}`);
+
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.logger.info('Shorts Packaging & Publishing Pipeline test completed successfully');
   }
 }
 

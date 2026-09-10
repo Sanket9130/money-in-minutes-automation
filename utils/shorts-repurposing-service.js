@@ -2,8 +2,11 @@ const fs = require('fs').promises;
 const path = require('path');
 const { runFFmpeg } = require('./ffmpeg');
 const { Logger } = require('./logger');
+const { VisualTreatmentSelector, VisualTreatmentRenderer } = require('./visual-treatment-engine');
+const { ShortsPackagingService } = require('./shorts-packaging-service');
+const { ShortsCoverGenerator } = require('./shorts-cover-generator');
 
-const LAYOUTS = new Set(['blur', 'crop', 'stacked']);
+const LAYOUTS = new Set(['blur', 'crop', 'stacked', 'scene_treatment']);
 
 function clamp(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, Number(value) || minimum));
@@ -37,6 +40,10 @@ class ShortsRepurposingService {
     this.width = Number(options.width || 1080);
     this.height = Number(options.height || 1920);
     this.runFFmpeg = options.runFFmpeg || runFFmpeg;
+    this.treatmentSelector = options.treatmentSelector || new VisualTreatmentSelector({ logger: this.logger });
+    this.treatmentRenderer = options.treatmentRenderer || new VisualTreatmentRenderer({ logger: this.logger, runFFmpeg: this.runFFmpeg });
+    this.packagingService = options.packagingService || new ShortsPackagingService({ logger: this.logger });
+    this.coverGenerator = options.coverGenerator || new ShortsCoverGenerator({ logger: this.logger, width: this.width, height: this.height });
   }
 
   async propose(productionId, input = {}) {
@@ -144,7 +151,7 @@ class ShortsRepurposingService {
       changes.tags = [...new Set(tags.map(tag => String(tag).trim()).filter(Boolean))].slice(0, 30);
     }
     if (input.layout !== undefined) {
-      if (!LAYOUTS.has(input.layout)) throw new Error('Short layout must be blur, crop, or stacked');
+      if (!LAYOUTS.has(input.layout)) throw new Error('Short layout must be blur, crop, stacked, or scene_treatment');
       changes.layout = input.layout;
     }
     if (input.publishTime !== undefined) {
@@ -164,7 +171,7 @@ class ShortsRepurposingService {
     return this.db.updateShortClip(clipId, changes);
   }
 
-  async render(productionId, clipId) {
+  async render(productionId, clipId, options = {}) {
     const bundle = await this.requireSource(productionId);
     const clip = await this.requireClip(productionId, clipId);
     if (['approved', 'scheduled', 'uploading', 'published', 'reconciliation_required'].includes(clip.status)) {
@@ -184,6 +191,10 @@ class ShortsRepurposingService {
     await fs.writeFile(captionsPath, this.buildCaptions(sourceScenes, clip.duration), 'utf8');
     await this.db.updateShortClip(clip.id, { status: 'rendering', error: null });
 
+    if (clip.layout === 'scene_treatment' || options.useSceneTreatments === true) {
+      return this.renderSceneBasedShort(bundle, clip, sourceScenes, outputPath, captionsPath);
+    }
+
     try {
       const filter = this.videoFilter(clip.layout, captionsPath);
       await this.runFFmpeg([
@@ -202,6 +213,134 @@ class ShortsRepurposingService {
     } catch (error) {
       await this.db.updateShortClip(clip.id, { status: 'failed', error: error.message });
       throw error;
+    }
+  }
+
+  async renderSceneBasedShort(bundleOrId, clipOrId, sourceScenesOrPlans, outputPathOrOptions, captionsPath) {
+    let bundle;
+    let clip;
+    let sourceScenes;
+    let outputPath;
+    let srtPath = captionsPath;
+    let options = {};
+
+    if (typeof bundleOrId === 'string') {
+      const productionId = bundleOrId;
+      const clipId = clipOrId;
+      bundle = await this.requireSource(productionId);
+      clip = await this.requireClip(productionId, clipId);
+      const directory = path.join(this.dataRoot, productionId);
+      await fs.mkdir(directory, { recursive: true });
+      outputPath = path.join(directory, `${clip.id}.mp4`);
+      srtPath = path.join(directory, `${clip.id}.srt`);
+      sourceScenes = Array.isArray(sourceScenesOrPlans) ? sourceScenesOrPlans : (bundle.scenes || []);
+      options = outputPathOrOptions || {};
+      await fs.writeFile(srtPath, this.buildCaptions(sourceScenes, clip.duration), 'utf8');
+      await this.db.updateShortClip(clip.id, { status: 'rendering', error: null });
+    } else {
+      bundle = bundleOrId;
+      clip = clipOrId;
+      sourceScenes = sourceScenesOrPlans;
+      outputPath = outputPathOrOptions;
+    }
+
+    const verifiedContext = {
+      verifiedData: bundle.verifiedData || bundle.script?.verifiedData || [],
+      truthAnchor: bundle.truthAnchor || bundle.script?.truthAnchor || [],
+      claims: bundle.claims || bundle.script?.claims || [],
+      facts: bundle.facts || bundle.script?.facts || []
+    };
+
+    const plans = sourceScenes.map(scene => {
+      if (scene.treatment && scene.visualLayers) return scene;
+      return this.treatmentSelector.buildPlan(scene, verifiedContext, {
+        width: this.width,
+        height: this.height,
+        duration: scene.duration
+      });
+    });
+
+    const audioPath = bundle.assets?.audio?.path;
+    const clipAudioPath = path.join(path.dirname(outputPath), `${clip.id}_audio.mp3`);
+    let hasAudio = false;
+
+    if (audioPath) {
+      try {
+        await fs.access(audioPath);
+        await this.runFFmpeg([
+          '-y', '-ss', String(clip.startSeconds || 0), '-i', audioPath, '-t', String(clip.duration),
+          '-c:a', 'copy', clipAudioPath
+        ]);
+        hasAudio = true;
+      } catch (_err) {
+        hasAudio = false;
+      }
+    } else if (bundle.assets?.finalVideo?.path) {
+      try {
+        await this.runFFmpeg([
+          '-y', '-ss', String(clip.startSeconds || 0), '-i', bundle.assets.finalVideo.path, '-t', String(clip.duration),
+          '-vn', '-c:a', 'libmp3lame', '-q:a', '2', clipAudioPath
+        ]);
+        hasAudio = true;
+      } catch (_err) {
+        hasAudio = false;
+      }
+    }
+
+    try {
+      await this.treatmentRenderer.composeShort(plans, hasAudio ? clipAudioPath : null, outputPath, {
+        width: this.width,
+        height: this.height,
+        ...options
+      });
+
+      await this.runFFmpeg(['-v', 'error', '-i', outputPath, '-f', 'null', '-']);
+      const stats = await fs.stat(outputPath);
+      if (!stats.isFile() || stats.size <= 0) throw new Error('FFmpeg returned an empty Short');
+
+      const coverPath = path.join(path.dirname(outputPath), `${clip.id}_cover.jpg`);
+      const cover = await this.coverGenerator.generateCover({
+        script: { title: clip.title },
+        scenes: sourceScenes,
+        verifiedData: verifiedContext.verifiedData
+      }, coverPath);
+
+      const pkg = await this.packagingService.generatePublishingPackage({
+        id: clip.id,
+        script: { title: clip.title, hook: { text: clip.title } },
+        strategy: bundle.strategy,
+        provenance: bundle.provenance,
+        verifiedData: verifiedContext.verifiedData,
+        assets: { cover }
+      }, {
+        title: clip.title,
+        shortClipId: clip.id,
+        parentUrl: bundle.schedule?.youtubeUrl || bundle.schedule?.youtube_url
+      });
+
+      const updated = await this.db.updateShortClip(clip.id, {
+        status: 'rendered', outputPath, captionsPath: srtPath,
+        inheritedEvidence: {
+          ...(clip.inheritedEvidence || {}),
+          coverPath: cover.path,
+          cover,
+          packaging: pkg.toJSON()
+        },
+        error: null,
+        renderedAt: new Date().toISOString()
+      });
+
+      return {
+        ...(updated || clip),
+        coverPath: cover.path,
+        cover,
+        packaging: pkg.toJSON()
+      };
+    } catch (error) {
+      await this.db.updateShortClip(clip.id, { status: 'failed', error: error.message });
+      throw error;
+    } finally {
+      if (hasAudio) await fs.unlink(clipAudioPath).catch(() => {});
     }
   }
 
@@ -275,23 +414,28 @@ class ShortsRepurposingService {
     const privacyStatus = input.privacyStatus || clip.privacyStatus || 'private';
     if (!['private', 'unlisted', 'public'].includes(privacyStatus)) throw new Error('Short privacy is invalid');
     const parentUrl = bundle.schedule?.youtube_url || bundle.schedule?.youtubeUrl;
-    const description = parentUrl && !clip.description.includes(parentUrl)
-      ? `${clip.description}\n\nWatch the full video: ${parentUrl}`.slice(0, 5000)
-      : clip.description;
+    const coverPath = clip.coverPath || clip.inheritedEvidence?.coverPath || clip.packaging?.cover?.path || null;
+    const packaging = clip.packaging || clip.inheritedEvidence?.packaging || null;
+    const title = packaging?.title || clip.title;
+    let description = packaging?.description || clip.description;
+    if (parentUrl && !description.includes(parentUrl)) {
+      description = `${description}\n\nWatch the full video: ${parentUrl}`.slice(0, 5000);
+    }
+    const tags = packaging?.tags || [...new Set([...(clip.tags || []), 'Shorts'])];
     const audio = bundle.assets?.audio || {};
     const schedule = await this.publishing.scheduleContent({
       id: clip.id,
-      script: { title: clip.title },
+      script: { title },
       seo: {
-        title: clip.title,
+        title,
         description,
-        tags: [...new Set([...(clip.tags || []), 'Shorts'])]
+        tags
       },
       assets: {
         finalVideo: { path: clip.outputPath, simulated: false, aspectRatio: '9:16', duration: clip.duration },
         audio,
         captions: clip.captionsPath ? { path: clip.captionsPath } : null,
-        thumbnail: null
+        thumbnail: coverPath ? { path: coverPath } : null
       },
       scheduledPublishTime: publishTime.toISOString(),
       priority: 60,
@@ -299,18 +443,29 @@ class ShortsRepurposingService {
       containsSyntheticMedia: evidence.containsSyntheticMedia,
       contentType: 'short',
       sourceProductionId: productionId,
-      shortClipId: clip.id
+      shortClipId: clip.id,
+      packagingPackage: packaging || null
     });
     if (!schedule) {
       const error = new Error('The Short could not be scheduled because its rendered media or narration evidence is incomplete');
       error.status = 409;
       throw error;
     }
-    return this.db.updateShortClip(clip.id, {
+    const updated = await this.db.updateShortClip(clip.id, {
       status: 'scheduled', publishTime: publishTime.toISOString(), privacyStatus,
-      inheritedEvidence: evidence, approvedAt: new Date().toISOString(), scheduleId: schedule.id,
+      inheritedEvidence: {
+        ...evidence,
+        coverPath,
+        packaging
+      },
+      approvedAt: new Date().toISOString(), scheduleId: schedule.id,
       error: null
     });
+    return {
+      ...(updated || clip),
+      coverPath,
+      packaging
+    };
   }
 
   inheritedEvidence(bundle) {

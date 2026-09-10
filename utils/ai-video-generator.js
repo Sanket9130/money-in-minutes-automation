@@ -7,6 +7,9 @@ const sharp = require('sharp');
 const { Logger } = require('./logger');
 const { runFFmpeg, checkFFmpeg, ffmpegInstallHint } = require('./ffmpeg');
 const { MediaGenerationService } = require('./media-generation-service');
+const { VisualTreatmentSelector, VisualTreatmentRenderer } = require('./visual-treatment-engine');
+const { ShortsPackagingService } = require('./shorts-packaging-service');
+const { ShortsCoverGenerator } = require('./shorts-cover-generator');
 
 class AIVideoGenerator {
   constructor(credentials, options = {}) {
@@ -15,6 +18,8 @@ class AIVideoGenerator {
     this.db = options.db || null;
     this.lastVideoResult = null;
     this.lastNarrationResult = null;
+    this.packagingService = options.packagingService || new ShortsPackagingService({ logger: this.logger });
+    this.coverGenerator = options.coverGenerator || new ShortsCoverGenerator({ logger: this.logger });
     
     // Initialize AI services with graceful fallback
     const openaiKey = resolvedCredentials.openai?.apiKey || process.env.OPENAI_API_KEY;
@@ -57,6 +62,8 @@ class AIVideoGenerator {
     this.mediaGeneration = options.mediaGeneration || (this.db
       ? new MediaGenerationService(this.db, resolvedCredentials, { logger: this.logger })
       : null);
+    this.visualTreatmentEngine = options.visualTreatmentEngine || new VisualTreatmentRenderer({ logger: this.logger });
+    this.visualTreatmentSelector = options.visualTreatmentSelector || new VisualTreatmentSelector({ logger: this.logger });
   }
 
   async generateTTSAudio(text, outputPath) {
@@ -357,6 +364,10 @@ class AIVideoGenerator {
         }
       }
 
+      if (options.useSceneTreatments === true || options.mode === 'scene-treatment') {
+        return await this.generateSceneTreatedVideo(script, visualAssets, audioPath, outputPath, options);
+      }
+
       const produced = await this.generateSlideshowVideo(script, visualAssets, audioPath, outputPath);
       this.lastVideoResult = { requestedProvider: 'slideshow', actualProvider: 'slideshow', model: 'local-ffmpeg', mode: 'slideshow', generatedSeconds: 0, tasks: [], scenes: [] };
       return produced;
@@ -384,6 +395,105 @@ class AIVideoGenerator {
         return produced;
       }
     }
+  }
+
+  async generateSceneTreatedVideo(script, visualAssets, audioPath, outputPath, options = {}) {
+    if (!(await checkFFmpeg())) throw new Error(ffmpegInstallHint());
+    const validImages = await this.filterLocalImageAssets(visualAssets);
+    const scenes = [];
+    if (script.hook) {
+      scenes.push({
+        id: 'hook',
+        label: 'Hook',
+        scriptText: script.hook.text,
+        duration: Math.max(2, this.parseDurationSeconds(script.hook.duration || 3)),
+        assetPath: validImages[0] || null,
+        isHook: true
+      });
+    }
+    const sections = script.mainContent?.sections || [];
+    sections.forEach((section, idx) => {
+      let text = '';
+      if (Array.isArray(section.content)) text = section.content.filter(l => typeof l === 'string' && !l.startsWith('[')).join(' ');
+      else if (typeof section.content === 'string') text = section.content;
+      else if (section.steps) text = section.steps.map(s => `${s.title}. ${s.description}`).join(' ');
+      else if (section.items) text = section.items.map(s => `${s.title}. ${s.description}`).join(' ');
+
+      scenes.push({
+        id: `section_${idx + 1}`,
+        label: section.title || `Section ${idx + 1}`,
+        scriptText: text || section.title || `Section ${idx + 1}`,
+        duration: Math.max(2, section.duration || 5),
+        assetPath: validImages[(idx + 1) % Math.max(1, validImages.length)] || null
+      });
+    });
+
+    if (!scenes.length) {
+      scenes.push({
+        id: 'main',
+        label: script.title || 'Video',
+        scriptText: script.title || 'Video',
+        duration: this.calculateScriptDuration(script) || 10,
+        assetPath: validImages[0] || null
+      });
+    }
+
+    const verifiedContext = {
+      verifiedData: options.verifiedData || script.verifiedData || [],
+      truthAnchor: options.truthAnchor || script.truthAnchor || [],
+      claims: options.claims || script.claims || []
+    };
+
+    const width = Number(options.width || (options.aspectRatio === '9:16' ? 1080 : 1920));
+    const height = Number(options.height || (options.aspectRatio === '9:16' ? 1920 : 1080));
+    const plans = scenes.map(s => this.visualTreatmentSelector.buildPlan(s, verifiedContext, { width, height, ...options }));
+
+    await this.visualTreatmentEngine.composeShort(plans, audioPath, outputPath, { width, height, ...options });
+
+    let cover = null;
+    let packaging = null;
+    if (options.generatePackaging || options.aspectRatio === '9:16') {
+      try {
+        const coverPath = outputPath.replace(/\.mp4$/i, '_cover.jpg');
+        cover = await this.coverGenerator.generateCover({
+          script,
+          scenes: plans,
+          verifiedData: verifiedContext.verifiedData,
+          truthAnchor: verifiedContext.truthAnchor
+        }, coverPath, { width, height });
+
+        packaging = await this.packagingService.generatePublishingPackage({
+          title: script.title,
+          script,
+          scenes: plans,
+          verifiedData: verifiedContext.verifiedData,
+          truthAnchor: verifiedContext.truthAnchor,
+          provenance: options.provenance || null,
+          cover: cover ? { path: cover.path, width: cover.width, height: cover.height } : null
+        });
+      } catch (err) {
+        this.logger.warn('Cover or packaging generation warning in AIVideoGenerator:', err.message);
+      }
+    }
+
+    this.lastVideoResult = {
+      requestedProvider: 'scene-visual-treatment',
+      actualProvider: 'scene-visual-treatment',
+      model: 'local-ffmpeg-sharp',
+      mode: 'scene-treatment',
+      generatedSeconds: plans.reduce((acc, p) => acc + p.duration, 0),
+      tasks: [],
+      cover,
+      packaging,
+      scenes: plans.map(p => ({
+        label: p.label,
+        treatment: p.treatment,
+        motion: p.motion,
+        sceneType: p.sceneType,
+        duration: p.duration
+      }))
+    };
+    return outputPath;
   }
 
   async generateHybridVideo(clips, visualAssets, audioPath, outputPath, totalDuration) {
