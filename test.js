@@ -50,6 +50,12 @@ class SystemTest {
       { name: 'Dynamic Karaoke Captions for Shorts', test: () => this.testDynamicKaraokeCaptions() },
       { name: 'First 2-Second Anti-Swipe Visual Hook', test: () => this.testAntiSwipeVisualHook() },
       { name: 'Financial Data Truth-Anchor', test: () => this.testFinancialDataTruthAnchor() },
+      { name: 'Trending Topic Discovery', test: () => this.testTrendingTopicDiscovery() },
+      { name: 'Semantic Concept Deduplication', test: () => this.testSemanticConceptDeduplication() },
+      { name: 'Shorts-Specific Analytics', test: () => this.testShortsSpecificAnalytics() },
+      { name: 'Content DNA Learning System', test: () => this.testContentDNALearningSystem() },
+      { name: 'Autonomous Daily Topic Selection', test: () => this.testAutonomousDailyTopicSelection() },
+      { name: 'Shorts Packaging and Visual Treatments', test: () => this.testPublishingAndPackagingFeatures() },
       { name: 'Evergreen Template Topics', test: () => this.testEvergreenTopics() },
       { name: 'Walkthrough Module', test: () => this.testWalkthroughModule() },
       { name: 'Logger System', test: () => this.testLogger() },
@@ -3272,6 +3278,601 @@ class SystemTest {
     }
 
     this.logger.info('Financial Data Truth-Anchor test completed successfully');
+  }
+
+  // =========================================================================
+  // INTELLIGENCE BATCH FEATURE 1: Trending Topic Discovery
+  // =========================================================================
+  async testTrendingTopicDiscovery() {
+    const { TrendingTopicDiscoveryEngine, TREND_STATES } = require('./utils/trending-topic-discovery');
+    const { SemanticDedupService } = require('./utils/semantic-dedup-service');
+    const { Database } = require('./database/db');
+    const fs = require('fs').promises;
+    const path = require('path');
+    const os = require('os');
+
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mim-discovery-'));
+    const db = new Database();
+    db.dbPath = path.join(directory, 'discovery_test.db');
+    await db.initialize();
+
+    try {
+      const dedup = new SemanticDedupService({ similarityThreshold: 0.65 });
+      const discoveryEngine = new TrendingTopicDiscoveryEngine({ db, dedupService: dedup, regionCode: 'US' });
+
+      // 1a. Multi-factor scoring calculation with Truth-Anchor feasibility
+      const candidateToScore = {
+        topic: 'Inside Nvidia AI Chip Revenue: Where the Billions Actually Come From',
+        publishedAt: new Date(Date.now() - 6 * 3600 * 1000).toISOString(),
+        sourceType: 'sec_edgar_quarterly',
+        url: 'https://www.sec.gov/edgar'
+      };
+      const scoreBreakdown = discoveryEngine.scoreCandidate(candidateToScore);
+      if (scoreBreakdown.totalScore < 60 || scoreBreakdown.freshnessScore !== 20 || scoreBreakdown.usAudienceScore < 15) {
+        throw new Error(`Scoring calculation error: ${JSON.stringify(scoreBreakdown)}`);
+      }
+      if (!scoreBreakdown.truthFeasibility || scoreBreakdown.truthFeasibility.feasible !== true) {
+        throw new Error(`Truth Anchor feasibility missing or rejected for official filing: ${JSON.stringify(scoreBreakdown.truthFeasibility)}`);
+      }
+      if (scoreBreakdown.truthFeasibilityScore < 10) {
+        throw new Error(`Truth feasibility score too low for primary filing: ${scoreBreakdown.truthFeasibilityScore}`);
+      }
+
+      // 1b. Trend State Classification
+      const risingCandidate = {
+        topic: 'How the US Federal Reserve Decision Affects Your Money',
+        publishedAt: new Date().toISOString(),
+        viewCount: 150000
+      };
+      const risingScore = { freshnessScore: 20, velocityScore: 25, totalScore: 90 };
+      const risingState = discoveryEngine.classifyTrendState(risingCandidate, risingScore);
+      if (risingState !== TREND_STATES.RISING) {
+        throw new Error(`Expected RISING trend state, got ${risingState}`);
+      }
+
+      const staleCandidate = { topic: 'Old History of Paper Currency' };
+      const staleScore = { freshnessScore: 5, velocityScore: 5, totalScore: 30 };
+      const staleState = discoveryEngine.classifyTrendState(staleCandidate, staleScore);
+      if (staleState !== TREND_STATES.DECLINING) {
+        throw new Error(`Expected DECLINING trend state, got ${staleState}`);
+      }
+
+      // 1c. Discovery run (with offline curated signals & dedup rejection)
+      const discoveredPool = await discoveryEngine.discoverCandidates({
+        historicalTopics: ['How the US Federal Reserve Interest Rate Decision Affects Your Money']
+      });
+      if (!discoveredPool || discoveredPool.length === 0) {
+        throw new Error('Candidate discovery returned empty pool');
+      }
+      const dupCandidate = discoveredPool.find(c => c.topic.toLowerCase().includes('federal reserve'));
+      if (dupCandidate && dupCandidate.status !== 'rejected') {
+        throw new Error(`Expected duplicate candidate to be rejected, got status ${dupCandidate.status}`);
+      }
+
+      // 1d. Optimal Candidate Selection
+      const optimalCandidate = await discoveryEngine.selectOptimalCandidate(discoveredPool, []);
+      if (!optimalCandidate || !optimalCandidate.topic || optimalCandidate.status !== 'selected') {
+        throw new Error(`Optimal candidate selection failed: ${JSON.stringify(optimalCandidate)}`);
+      }
+
+      // 1e. Database candidate persistence
+      const savedCandidate = await db.saveTopicCandidate(optimalCandidate);
+      if (!savedCandidate || !savedCandidate.id) {
+        throw new Error('Failed to persist topic candidate to database');
+      }
+      const poolFromDb = await db.getTopicCandidates({ limit: 10 });
+      if (!poolFromDb.length) {
+        throw new Error('getTopicCandidates returned empty list');
+      }
+    } finally {
+      await db.close();
+      await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.logger.info('Trending Topic Discovery test completed successfully');
+  }
+
+  // =========================================================================
+  // INTELLIGENCE BATCH FEATURE 2: Semantic Concept Deduplication
+  // =========================================================================
+  async testSemanticConceptDeduplication() {
+    const { SemanticDedupService, ConceptNormalizer } = require('./utils/semantic-dedup-service');
+    const { Database } = require('./database/db');
+    const fs = require('fs').promises;
+    const path = require('path');
+    const os = require('os');
+
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mim-dedup-'));
+    const db = new Database();
+    db.dbPath = path.join(directory, 'dedup_test.db');
+    await db.initialize();
+
+    try {
+      // 2a. Normalization: filler words, stopwords, numbers, punctuation, suffixes
+      const norm1 = ConceptNormalizer.normalize('How to Save Money in 2026!');
+      if (!norm1.tokens.includes('save') || !norm1.tokens.includes('money')) {
+        throw new Error(`ConceptNormalizer failed to keep key tokens: ${JSON.stringify(norm1)}`);
+      }
+
+      // 2b. Multi-tier Similarity: Exact, Semantically Similar, and Distinct
+      const dedup = new SemanticDedupService({ similarityThreshold: 0.65 });
+
+      // Exact duplicate check
+      const exactSim = dedup.calculateSimilarity('10 Best Habits for Productivity', '10 Best Habits for Productivity');
+      if (exactSim.similarity !== 1.0 || exactSim.status !== 'duplicate') {
+        throw new Error(`Exact duplicate failed with similarity ${exactSim.similarity}`);
+      }
+
+      // High semantic similarity (similar phrasing of same topic)
+      const semSim = dedup.calculateSimilarity('How to Save Money Every Month', 'Practical Ways to Save Money Each Month');
+      if (semSim.similarity < 0.50 || semSim.status !== 'similar' || semSim.verdict === 'accepted') {
+        throw new Error(`Semantically similar topics were not flagged: similarity ${semSim.similarity}, status ${semSim.status}, verdict ${semSim.verdict}`);
+      }
+
+      // Distinct topics must be classified as new / accepted
+      const distinctSim = dedup.calculateSimilarity('How to Save Money Every Month', 'Quantum Computing Advances in 2026');
+      if (distinctSim.similarity > 0.3 || distinctSim.verdict !== 'accepted') {
+        throw new Error(`Distinct topics falsely flagged as duplicate: similarity ${distinctSim.similarity}, verdict ${distinctSim.verdict}`);
+      }
+
+      // 2c. Zero external API requirement (100% offline & deterministic)
+      const offlineCheck = dedup.checkDeduplication('Apple Q3 Earnings Report', [
+        'Tesla Cybertruck Review',
+        'Apple Q3 Earnings Breakdown'
+      ]);
+      if (offlineCheck.verdict !== 'rejected' && offlineCheck.status !== 'duplicate' && offlineCheck.status !== 'similar') {
+        throw new Error('Deterministic offline deduplication failed to match Q3 Earnings topic');
+      }
+
+      // 2d. filterUniqueCandidates helper
+      const candidates = [
+        '10 Ways to Invest in Real Estate',
+        'Investing in Real Estate for Beginners',
+        'Artificial Intelligence in Healthcare',
+        '10 Ways to Invest in Real Estate' // duplicate
+      ];
+      const filtered = dedup.filterUniqueCandidates(candidates, ['How to Buy a House']);
+      if (filtered.length >= candidates.length) {
+        throw new Error('filterUniqueCandidates failed to deduplicate list');
+      }
+
+      // 2e. Database persistence: topic_dedup_log
+      const dedupRecord = await db.saveTopicDedupRecord({
+        candidateTopic: 'How to Invest in 2026',
+        matchedTopic: 'Investing in 2026',
+        similarity: 0.88,
+        status: 'duplicate',
+        verdict: 'rejected',
+        reason: 'Semantic similarity 0.88 exceeds threshold 0.65',
+        breakdown: { jaccard: 0.85, levenshtein: 0.90 }
+      });
+      if (!dedupRecord || dedupRecord.status !== 'duplicate') {
+        throw new Error('Database failed to save or retrieve topic_dedup_log');
+      }
+      const dedupHistory = await db.getRecentTopicDedupRecords(5);
+      if (!dedupHistory.length || dedupHistory[0].candidate_topic !== 'How to Invest in 2026') {
+        throw new Error('getRecentTopicDedupRecords failed');
+      }
+    } finally {
+      await db.close();
+      await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.logger.info('Semantic Concept Deduplication test completed successfully');
+  }
+
+  // =========================================================================
+  // INTELLIGENCE BATCH FEATURE 3: Shorts-Specific Analytics
+  // =========================================================================
+  async testShortsSpecificAnalytics() {
+    const { ShortsAnalyticsService } = require('./utils/shorts-analytics-service');
+    const { AnalyticsOptimizationAgent } = require('./agents/analytics-optimization-agent');
+    const { Database } = require('./database/db');
+    const fs = require('fs').promises;
+    const path = require('path');
+    const os = require('os');
+
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mim-analytics-'));
+    const db = new Database();
+    db.dbPath = path.join(directory, 'analytics_test.db');
+    await db.initialize();
+
+    try {
+      const shortsAnalytics = new ShortsAnalyticsService(db);
+
+      const rawAPIResponse = {
+        viewCount: 15420,
+        likeCount: 940,
+        commentCount: 78,
+        subscribersGained: 45,
+        subscribersLost: 5,
+        averageViewPercentage: 74.5,
+        averageViewDuration: 22.4,
+        totalWatchTime: 5756.16 // minutes
+      };
+      const videoContext = {
+        durationSeconds: 30,
+        publishedAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString() // 48h ago
+      };
+
+      const normalized = shortsAnalytics.normalizeShortsMetrics(rawAPIResponse, videoContext);
+
+      // 3a. Direct metrics verification
+      if (normalized.direct.views !== 15420 || normalized.direct.likes !== 940 || normalized.direct.comments !== 78) {
+        throw new Error('Direct metrics extraction failed');
+      }
+      if (normalized.direct.netSubscribers !== 40) {
+        throw new Error(`Expected netSubscribers 40, got ${normalized.direct.netSubscribers}`);
+      }
+      if (normalized.direct.averageViewPercentage !== 74.5) {
+        throw new Error(`Expected averageViewPercentage 74.5, got ${normalized.direct.averageViewPercentage}`);
+      }
+
+      // 3b. Mathematically valid derived metrics
+      if (normalized.derived.likeRate < 6.0 || normalized.derived.likeRate > 6.2) {
+        throw new Error(`Derived likeRate calculation inaccurate: ${normalized.derived.likeRate}`);
+      }
+      if (normalized.derived.commentRate < 0.45 || normalized.derived.commentRate > 0.55) {
+        throw new Error(`Derived commentRate calculation inaccurate: ${normalized.derived.commentRate}`);
+      }
+      if (normalized.derived.viewsPerDay <= 5000) {
+        throw new Error(`Derived viewsPerDay calculation inaccurate: ${normalized.derived.viewsPerDay}`);
+      }
+      if (typeof normalized.derived.performanceScore !== 'number' || normalized.derived.performanceScore <= 0) {
+        throw new Error('Derived performanceScore missing or invalid');
+      }
+
+      // 3c. Strictly UNAVAILABLE metrics (No fabrication of restricted partner data)
+      if (normalized.unavailable.viewedVsSwipedAway.available !== false || normalized.unavailable.viewedVsSwipedAway.value !== null) {
+        throw new Error('viewedVsSwipedAway must be strictly flagged as unavailable with null value');
+      }
+      if (!normalized.unavailable.viewedVsSwipedAway.reason.includes('partner')) {
+        throw new Error('viewedVsSwipedAway missing documented restriction reason');
+      }
+      if (normalized.unavailable.shortsFeedCTR.available !== false || normalized.unavailable.shortsFeedCTR.value !== null) {
+        throw new Error('shortsFeedCTR must be strictly flagged as unavailable with null value');
+      }
+
+      // 3d. Snapshot Comparison (Growth, Retention, and Score Deltas)
+      const snap24h = shortsAnalytics.createSnapshot('short_vid_1', {
+        direct: { views: 5000, averageViewPercentage: 70.0 },
+        derived: { performanceScore: 65 },
+        unavailable: normalized.unavailable
+      }, '24h');
+
+      const snap48h = shortsAnalytics.createSnapshot('short_vid_1', {
+        direct: { views: 12000, averageViewPercentage: 74.0 },
+        derived: { performanceScore: 82 },
+        unavailable: normalized.unavailable
+      }, '48h');
+
+      const comparison = shortsAnalytics.compareSnapshots(snap24h, snap48h);
+      if (comparison.viewGrowth !== 7000 || comparison.retentionDelta !== 4.0 || comparison.scoreDelta !== 17) {
+        throw new Error(`Snapshot comparison calculation failed: ${JSON.stringify(comparison)}`);
+      }
+      if (comparison.growthTrajectory !== 'accelerating') {
+        throw new Error(`Expected accelerating growth trajectory, got ${comparison.growthTrajectory}`);
+      }
+
+      // 3e. Database: shorts_analytics_snapshots
+      const savedSnapshot = await db.saveShortsAnalyticsSnapshot({
+        videoId: 'yt_short_123',
+        productionId: 'prod_test_1',
+        measurementWindow: '24h',
+        directMetrics: normalized.direct,
+        derivedMetrics: normalized.derived,
+        unavailableMetrics: normalized.unavailable,
+        performanceScore: normalized.derived.performanceScore
+      });
+      if (!savedSnapshot || savedSnapshot.videoId !== 'yt_short_123') {
+        throw new Error('Database failed to save or retrieve shorts_analytics_snapshots');
+      }
+      const retrievedSnapshot = await db.getShortsAnalyticsSnapshot('yt_short_123', '24h');
+      if (!retrievedSnapshot || retrievedSnapshot.unavailableMetrics.viewedVsSwipedAway.available !== false) {
+        throw new Error('getShortsAnalyticsSnapshot failed or corrupted unavailable taxonomy');
+      }
+
+      // 3f. Agent Integration: AnalyticsOptimizationAgent
+      const analyticsAgent = new AnalyticsOptimizationAgent(db, {});
+      if (typeof analyticsAgent.shortsAnalytics.normalizeShortsMetrics !== 'function') {
+        throw new Error('AnalyticsOptimizationAgent missing shortsAnalytics instance');
+      }
+    } finally {
+      await db.close();
+      await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.logger.info('Shorts-Specific Analytics test completed successfully');
+  }
+
+  // =========================================================================
+  // INTELLIGENCE BATCH FEATURE 4: Content DNA & Performance Learning
+  // =========================================================================
+  async testContentDNALearningSystem() {
+    const { ContentDNAService } = require('./utils/content-dna-service');
+    const { Database } = require('./database/db');
+    const fs = require('fs').promises;
+    const path = require('path');
+    const os = require('os');
+
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mim-dna-'));
+    const db = new Database();
+    db.dbPath = path.join(directory, 'dna_test.db');
+    await db.initialize();
+
+    try {
+      const contentDNA = new ContentDNAService(db);
+
+      // 4a. Trait Extraction from Production Bundle
+      const mockProduction = {
+        id: 'prod_test_dna_1',
+        youtubeId: 'yt_short_123',
+        strategy: { topic: 'Passive Income Strategies', category: 'business' },
+        script: {
+          title: '5 Passive Income Ideas for 2026',
+          durationSeconds: 42,
+          hook: { text: 'Stop trading time for money!' },
+          mainContent: { sections: [{}, {}, {}, {}] },
+          callToAction: 'Subscribe for daily wealth tips'
+        },
+        hookConfig: { variant: 'warning-alert', duration: 1.8 },
+        contentType: 'short',
+        scheduledPublishTime: '2026-09-16T14:00:00.000Z' // Wednesday 14:00
+      };
+
+      const extractedDNA = contentDNA.extractDNA(mockProduction);
+      const traits = extractedDNA.traits;
+      if (traits.topicCategory !== 'business') {
+        throw new Error(`Expected topicCategory business, got ${traits.topicCategory}`);
+      }
+      if (traits.hookVariant !== 'warning-alert' || traits.hookDuration !== 1.8) {
+        throw new Error(`Hook traits incorrect: ${traits.hookVariant} / ${traits.hookDuration}`);
+      }
+      if (traits.videoDurationBucket !== '30_45s') {
+        throw new Error(`Duration bucket incorrect: expected 30_45s, got ${traits.videoDurationBucket}`);
+      }
+      if (traits.captionStyle !== 'karaoke_highlight') {
+        throw new Error(`Caption style for short should be karaoke_highlight, got ${traits.captionStyle}`);
+      }
+      if (traits.publishingDay !== 'Wednesday' || traits.publishingHour !== 14) {
+        throw new Error(`Publishing day/hour incorrect: ${traits.publishingDay} at ${traits.publishingHour}`);
+      }
+
+      // 4b. Sample-Size Protection Guardrail (< 3 samples)
+      const smallSampleSet = [
+        contentDNA.linkDNAToPerformance(extractedDNA, { performanceScore: 90, direct: { views: 50000, averageViewPercentage: 85 } }),
+        contentDNA.linkDNAToPerformance(extractedDNA, { performanceScore: 88, direct: { views: 42000, averageViewPercentage: 80 } })
+      ];
+      const smallAgg = contentDNA.aggregatePerformanceByTrait(smallSampleSet, 3);
+      const safeRecommendation = contentDNA.recommendOptimalDNA(smallAgg);
+      if (safeRecommendation.confidence !== 'neutral_default') {
+        throw new Error(`Sample guardrail failed: expected neutral_default with N=2, got ${safeRecommendation.confidence}`);
+      }
+      if (!safeRecommendation.evidenceNotes.includes('Insufficient empirical')) {
+        throw new Error(`Sample guardrail missing explanatory note: ${safeRecommendation.evidenceNotes}`);
+      }
+
+      // 4c. Empirical Learning with Sufficient Sample Size (N >= 3)
+      const sufficientSampleSet = [
+        ...smallSampleSet,
+        contentDNA.linkDNAToPerformance(
+          contentDNA.extractDNA({ ...mockProduction, id: 'prod_test_dna_3' }),
+          { performanceScore: 85, direct: { views: 38000, averageViewPercentage: 82 } }
+        )
+      ];
+      const sufficientAgg = contentDNA.aggregatePerformanceByTrait(sufficientSampleSet, 3);
+      const optimalRecommendation = contentDNA.recommendOptimalDNA(sufficientAgg);
+      if (optimalRecommendation.confidence !== 'statistically_supported') {
+        throw new Error(`Optimal recommendation failed to validate with N=3: got ${optimalRecommendation.confidence}`);
+      }
+      if (optimalRecommendation.hookVariant !== 'warning-alert') {
+        throw new Error(`Optimal recommendation did not choose supported hookVariant: ${optimalRecommendation.hookVariant}`);
+      }
+
+      // 4d. Database persistence in content_dna
+      const savedDNA = await db.saveContentDNA(extractedDNA);
+      if (!savedDNA || savedDNA.traits.hookVariant !== 'warning-alert') {
+        throw new Error('Database failed to save or retrieve content_dna');
+      }
+      const retrievedDNA = await db.getContentDNA(mockProduction.id);
+      if (!retrievedDNA || retrievedDNA.traits.topicCategory !== 'business') {
+        throw new Error('getContentDNA failed to return correct traits');
+      }
+    } finally {
+      await db.close();
+      await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.logger.info('Content DNA & Learning System test completed successfully');
+  }
+
+  // =========================================================================
+  // INTELLIGENCE BATCH FEATURE 5: Autonomous Daily Topic Selection
+  // =========================================================================
+  async testAutonomousDailyTopicSelection() {
+    const { ContentStrategyAgent } = require('./agents/content-strategy-agent');
+    const { Database } = require('./database/db');
+    const fs = require('fs').promises;
+    const path = require('path');
+    const os = require('os');
+
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mim-selection-'));
+    const db = new Database();
+    db.dbPath = path.join(directory, 'selection_test.db');
+    await db.initialize();
+
+    try {
+      const strategyAgent = new ContentStrategyAgent(db, {});
+      strategyAgent.historicalPerformance = [
+        { topic: 'How to Start a Side Project With Zero Budget', createdAt: new Date().toISOString() }
+      ];
+
+      // 5a. Deduplication check against historical topics
+      const candidateDup = 'How to Start a Side Project with Zero Budget';
+      const dupCheck = strategyAgent.dedupService.checkDeduplication(candidateDup, strategyAgent.getRecentTopics());
+      if (dupCheck.status !== 'duplicate') {
+        throw new Error('ContentStrategyAgent dedupService failed to flag historical duplicate');
+      }
+
+      // 5b. selectOptimalTopic excludes semantic duplicates
+      strategyAgent.trendingTopics = [
+        { topic: 'How to Start a Side Project With Zero Budget', score: 10 }, // duplicate
+        { topic: 'AI Productivity Tools You Should Use', score: 5 } // novel
+      ];
+      const selected = strategyAgent.selectOptimalTopic();
+      if (selected.topic === 'How to Start a Side Project With Zero Budget') {
+        throw new Error('ContentStrategyAgent selectOptimalTopic picked duplicate historical topic');
+      }
+      if (selected.topic !== 'AI Productivity Tools You Should Use') {
+        throw new Error(`ContentStrategyAgent selectOptimalTopic did not pick novel topic: "${selected.topic}"`);
+      }
+
+      // 5c. generateContentStrategy attaches dedupAnalysis and DNA recommendation metadata
+      const generatedStrategy = await strategyAgent.generateContentStrategy('Artificial Intelligence in Medicine');
+      if (!generatedStrategy.topic || !generatedStrategy.dedupAnalysis) {
+        throw new Error('generateContentStrategy did not include topic or dedupAnalysis');
+      }
+
+      // 5d. Template evergreen fallback maintains readability and distinctness
+      strategyAgent.trendingTopics = [{ topic: 'junk', score: 1 }];
+      const fallbackTopic = strategyAgent.selectOptimalTopic();
+      if (!fallbackTopic.topic.includes(' ') || fallbackTopic.topic.length < 8) {
+        throw new Error(`Template mode produced a junk fallback topic: "${fallbackTopic.topic}"`);
+      }
+    } finally {
+      await db.close();
+      await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.logger.info('Autonomous Daily Topic Selection test completed successfully');
+  }
+
+  // =========================================================================
+  // VIDEO PUBLISHING & PACKAGING COMPATIBILITY (BATCH 2 COMPATIBILITY)
+  // =========================================================================
+  async testPublishingAndPackagingFeatures() {
+    const { ContentDNAService } = require('./utils/content-dna-service');
+    const { Database } = require('./database/db');
+    const fs = require('fs').promises;
+    const path = require('path');
+    const os = require('os');
+
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mim-publishing-'));
+    const db = new Database();
+    db.dbPath = path.join(directory, 'publishing_test.db');
+    await db.initialize();
+
+    try {
+      const contentDNA = new ContentDNAService(db);
+
+      // Trait extraction and storage without touching ProductionManagementAgent
+      const completedProd = {
+        id: 'prod_batch2_agent_test',
+        strategy: { topic: '10 Habit Hacks', contentType: 'Short' },
+        script: {
+          title: '10 Habit Hacks',
+          duration: 35,
+          hook: { text: 'Stop doing these 3 things every morning!' },
+          mainContent: { sections: [{}, {}] }
+        },
+        thumbnail: {},
+        seo: { title: '10 Habit Hacks' },
+        assets: { finalVideo: { path: 'test.mp4', simulated: true } },
+        timeline: {}
+      };
+      await db.saveProductionData(completedProd);
+      const dnaFromProd = contentDNA.extractDNA(completedProd, { isShort: true });
+      await db.saveContentDNA(dnaFromProd);
+      const storedProdDNA = await db.getContentDNA('prod_batch2_agent_test');
+      if (!storedProdDNA || storedProdDNA.traits.captionStyle !== 'karaoke_highlight') {
+        throw new Error('Content DNA recording failed');
+      }
+
+      // 6. Shorts Packaging Service & Title Tournament (if utility present)
+      let PackagingModule = null;
+      try {
+        PackagingModule = require('./utils/shorts-packaging-service');
+      } catch (_err) {
+        PackagingModule = null;
+      }
+
+      let selectedTitle = 'Nvidia Revenue Breakdown';
+      const testScriptForPackaging = {
+        title: 'Nvidia Revenue Secret',
+        duration: 38,
+        hook: { text: 'Nvidia made $30 Billion last quarter, but not how you think.' },
+        mainContent: {
+          sections: [
+            { text: 'Most people think Nvidia sells graphics cards for gamers.' },
+            { text: 'In reality, data center AI chips make up 87 percent of total sales.' }
+          ]
+        },
+        topic: 'Nvidia Revenue Breakdown',
+        provenance: {
+          sources: [{ url: 'https://www.sec.gov/edgar/data/1045810', publisher: 'SEC EDGAR', factSummary: 'Data center revenue' }]
+        }
+      };
+
+      if (PackagingModule && PackagingModule.ShortsPackagingService) {
+        const packagingService = new PackagingModule.ShortsPackagingService({ db, dnaService: contentDNA });
+        const candidateTitles = packagingService.generateTitleCandidates(testScriptForPackaging, { topic: 'Nvidia Revenue Breakdown' });
+        if (candidateTitles.length < 3) {
+          throw new Error(`Expected at least 3 title tournament candidates, got ${candidateTitles.length}`);
+        }
+        selectedTitle = await packagingService.selectOptimalTitle(candidateTitles, { topic: 'Nvidia Revenue Breakdown' });
+        if (!selectedTitle || typeof selectedTitle !== 'string') {
+          throw new Error('Title selection failed');
+        }
+      }
+
+      // 7. Shorts Cover Generator (if utility present)
+      let CoverModule = null;
+      try {
+        CoverModule = require('./utils/shorts-cover-generator');
+      } catch (_err) {
+        CoverModule = null;
+      }
+
+      if (CoverModule && CoverModule.ShortsCoverGenerator) {
+        const sharp = require('sharp');
+        const coverGen = new CoverModule.ShortsCoverGenerator({ outputDir: directory });
+
+        const portraitCover = await coverGen.generatePortraitCover(testScriptForPackaging, {
+          title: selectedTitle,
+          headline: 'Where Nvidia Billions Actually Come From',
+          statPill: '87% AI Revenue'
+        });
+        if (!portraitCover.filePath || portraitCover.width !== 1080 || portraitCover.height !== 1920) {
+          throw new Error(`Portrait cover dimensions mismatch: ${JSON.stringify(portraitCover)}`);
+        }
+        const portraitMeta = await sharp(portraitCover.filePath).metadata();
+        if (portraitMeta.width !== 1080 || portraitMeta.height !== 1920) {
+          throw new Error(`Sharp verified portrait cover is ${portraitMeta.width}x${portraitMeta.height}, expected 1080x1920`);
+        }
+      }
+
+      // 8. Visual Treatment Router (if utility present)
+      let RouterModule = null;
+      try {
+        RouterModule = require('./utils/visual-treatment-router');
+      } catch (_err) {
+        RouterModule = null;
+      }
+
+      if (RouterModule && RouterModule.VisualTreatmentRouter) {
+        const router = new RouterModule.VisualTreatmentRouter();
+        const hookScene = { index: 0, scriptText: 'Here is how Nvidia actually makes money' };
+        const hookTreatment = router.classifyScene(hookScene, 0);
+        if (hookTreatment.type !== RouterModule.SCENE_VISUAL_TYPES.HOOK) {
+          throw new Error(`Scene 0 expected HOOK treatment, got ${hookTreatment.type}`);
+        }
+      }
+    } finally {
+      await db.close();
+      await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.logger.info('Publishing and packaging compatibility test completed successfully');
   }
 
   async testEvergreenTopics() {

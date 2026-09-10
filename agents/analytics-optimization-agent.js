@@ -1,6 +1,7 @@
 const { google } = require('googleapis');
 const { Logger } = require('../utils/logger');
 const { ChannelLearningEngine } = require('../utils/channel-learning-engine');
+const { ShortsAnalyticsService } = require('../utils/shorts-analytics-service');
 
 class AnalyticsOptimizationAgent {
   constructor(db, credentials) {
@@ -11,6 +12,7 @@ class AnalyticsOptimizationAgent {
     this.youtube = null;
     this.performanceData = new Map();
     this.learning = new ChannelLearningEngine(db);
+    this.shortsAnalytics = new ShortsAnalyticsService(db);
   }
 
   async initialize() {
@@ -123,6 +125,32 @@ class AnalyticsOptimizationAgent {
             impressions: analytics.views?.totalImpressions
           }
         );
+      }
+
+      // Batch 2: Capture structured Shorts Analytics Snapshot if content is a Short
+      const durationSeconds = this.shortsAnalytics.parseDurationSeconds(videoDetails.duration);
+      if (durationSeconds <= 60 || options.isShort) {
+        try {
+          const rawStats = {
+            views: analytics.views?.totalViews,
+            likes: videoDetails.statistics?.likeCount,
+            comments: videoDetails.statistics?.commentCount,
+            averageViewPercentage: retention?.averagePercentageViewed ?? analytics.views?.averagePercentageViewed,
+            averageViewDuration: analytics.views?.averageViewDuration,
+            totalWatchMinutes: analytics.watchTime?.totalMinutes,
+            publishedAt: videoDetails.publishedAt
+          };
+          const shortsSnapshot = await this.shortsAnalytics.recordSnapshot(
+            videoId,
+            rawStats,
+            { videoDetails, productionId: context?.productionId, durationSeconds },
+            measurementWindow
+          );
+          performanceReport.shortsAnalyticsSnapshot = shortsSnapshot;
+          this.logger.info(`Captured Shorts analytics snapshot for ${videoId} (${measurementWindow})`);
+        } catch (shortsErr) {
+          this.logger.debug(`Could not capture Shorts analytics snapshot: ${shortsErr.message}`);
+        }
       }
       
       this.logger.info(`Analysis complete. Performance score: ${performanceReport.performance.score}/100`);

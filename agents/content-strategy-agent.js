@@ -1,5 +1,8 @@
 const { Logger } = require('../utils/logger');
 const { AITextService } = require('../utils/ai-text-service');
+const { SemanticDedupService } = require('../utils/semantic-dedup-service');
+const { ContentDNAService } = require('../utils/content-dna-service');
+const { TrendingTopicDiscoveryEngine } = require('../utils/trending-topic-discovery');
 
 class ContentStrategyAgent {
   constructor(db, credentials) {
@@ -10,6 +13,9 @@ class ContentStrategyAgent {
     this.competitorData = [];
     this.contentCalendar = [];
     this.aiTextService = new AITextService(credentials?.credentials || credentials || {});
+    this.dedupService = new SemanticDedupService({ db: this.db });
+    this.dnaService = new ContentDNAService(this.db);
+    this.discoveryEngine = new TrendingTopicDiscoveryEngine({ db: this.db, dedupService: this.dedupService });
   }
 
   async initialize() {
@@ -40,6 +46,37 @@ class ContentStrategyAgent {
       
       // Combine insights
       this.trendingTopics = this.mergeTrendData(trends, competitors);
+
+      // Discover structured emerging and high-interest topics via Discovery Engine
+      try {
+        const recentTopics = this.getRecentTopics ? this.getRecentTopics() : [];
+        const discovered = await this.discoveryEngine.discoverCandidates({
+          youtubeClient: this.credentials?.getYouTubeClient ? this.credentials.getYouTubeClient() : null,
+          competitorChannels: (process.env.COMPETITOR_CHANNELS || '').split(',').filter(Boolean),
+          historicalTopics: recentTopics
+        });
+        if (discovered && discovered.length > 0) {
+          this.discoveredCandidates = discovered;
+          const topCandidates = discovered
+            .filter(c => c.status === 'candidate')
+            .map(c => ({
+              topic: c.topic,
+              score: (c.trendScore || 50) / 10,
+              trendScore: c.trendScore,
+              trendState: c.trendState,
+              sources: c.sources || ['trending_discovery'],
+              evidence: c.sourceMetadata?.url ? [{
+                url: c.sourceMetadata.url,
+                title: c.topic,
+                publisher: c.sourceMetadata.publisher,
+                sourceType: c.sourceMetadata.sourceType
+              }] : []
+            }));
+          this.trendingTopics = [...topCandidates, ...this.trendingTopics];
+        }
+      } catch (discErr) {
+        this.logger.debug(`Topic discovery engine signal gathering note: ${discErr.message}`);
+      }
       
       this.logger.info(`Identified ${this.trendingTopics.length} trending topics`);
     } catch (error) {
@@ -238,8 +275,14 @@ class ContentStrategyAgent {
       }
 
       this.logger.info('Using template content strategy generation');
+      let dedupResult = null;
       if (requestedTopic) {
         topic = requestedTopic;
+        const recentTopics = this.getRecentTopics();
+        dedupResult = await this.dedupService.checkDeduplication(topic, recentTopics);
+        if (dedupResult.status === 'duplicate' || dedupResult.verdict === 'rejected') {
+          this.logger.warn(`Requested topic "${topic}" flagged as duplicate/similar (similarity: ${dedupResult.similarity}). Matched: "${dedupResult.matchedTopic}"`);
+        }
         angle = await this.generateAngle(topic);
       } else {
         // Select from trending topics
@@ -254,6 +297,14 @@ class ContentStrategyAgent {
       // Select content type
       contentType = this.selectContentType(topic);
 
+      // Consult Content DNA learning recommendations if available
+      let dnaRecommendation = null;
+      try {
+        dnaRecommendation = await this.dnaService.recommendOptimalDNA();
+      } catch (err) {
+        this.logger.debug('DNA recommendation unavailable:', err.message);
+      }
+
       // Generate content calendar entry
       const strategy = {
         topic,
@@ -264,6 +315,8 @@ class ContentStrategyAgent {
         estimatedViews: this.predictViews(topic),
         bestPublishTime: this.calculateBestPublishTime(),
         competitorAnalysis: this.getCompetitorInsights(topic),
+        dedupAnalysis: dedupResult,
+        dnaRecommendations: dnaRecommendation?.confidence !== 'insufficient_sample' ? dnaRecommendation : null,
         createdAt: new Date().toISOString()
       };
 
@@ -395,6 +448,7 @@ Do not invent trend data, statistics, sources, URLs, or factual claims. Use only
     const allowedSourceUrls = new Set((research.sourceCatalog || []).map(source => source.url));
     const pillars = channelStrategy.contentPillars || [];
     const seen = new Set();
+    const historyTopics = research.recentTopics || [];
     return plan
       .map(item => ({
         topic: String(item.topic || '').trim().slice(0, 200),
@@ -414,6 +468,15 @@ Do not invent trend data, statistics, sources, URLs, or factual claims. Use only
       .filter(item => {
         const key = item.topic.toLowerCase();
         if (!item.topic || seen.has(key)) return false;
+
+        if (historyTopics.length > 0) {
+          const dedupCheck = this.dedupService.checkDeduplication(item.topic, historyTopics);
+          if (dedupCheck.status === 'duplicate' || dedupCheck.verdict === 'rejected') {
+            this.logger.info(`Autonomous plan excluded semantic duplicate: "${item.topic}" (matched: "${dedupCheck.matchedTopic}", similarity: ${dedupCheck.similarity})`);
+            return false;
+          }
+        }
+
         seen.add(key);
         return true;
       })
@@ -506,11 +569,15 @@ Avoid fabricated claims and unsupported numbers.`;
     return allowed.has(titleCased) ? titleCased : this.selectContentType(topic);
   }
   selectOptimalTopic() {
-    // Use scoring algorithm to select best topic
+    // Use scoring algorithm to select best topic with semantic deduplication
     const recentTopics = this.getRecentTopics();
 
     const scoredTopics = this.trendingTopics
-      .filter(topic => !recentTopics.includes(topic.topic))
+      .filter(topic => {
+        if (!topic || !topic.topic) return false;
+        const dedupResult = this.dedupService.checkDeduplication(topic.topic, recentTopics);
+        return dedupResult.verdict !== 'rejected' && dedupResult.status !== 'duplicate';
+      })
       .map(topic => ({
         ...topic,
         finalScore: topic.score * this.getSeasonalMultiplier(topic.topic) * this.getAudienceMultiplier(topic.topic)
@@ -525,8 +592,13 @@ Avoid fabricated claims and unsupported numbers.`;
     }
 
     const fallbackTopics = this.getEvergreenFallbackTopics();
-    const pick = fallbackTopics[Math.floor(Math.random() * fallbackTopics.length)];
-    this.logger.info(`Template mode: no readable trending topic available — using evergreen topic "${pick}"`);
+    const uniqueFallbacks = fallbackTopics.filter(topic => {
+      const dedupResult = this.dedupService.checkDeduplication(topic, recentTopics);
+      return dedupResult.verdict !== 'rejected' && dedupResult.status !== 'duplicate';
+    });
+    const candidates = uniqueFallbacks.length > 0 ? uniqueFallbacks : fallbackTopics;
+    const pick = candidates[Math.floor(Math.random() * candidates.length)];
+    this.logger.info(`Template mode: using evergreen topic "${pick}"`);
     return { topic: pick, score: 1 };
   }
 

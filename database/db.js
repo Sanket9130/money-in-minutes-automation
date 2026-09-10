@@ -622,6 +622,57 @@ class Database {
         value TEXT NOT NULL,
         description TEXT,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )`,
+      // Topic Deduplication Log (Batch 2)
+      `CREATE TABLE IF NOT EXISTS topic_dedup_log (
+        id TEXT PRIMARY KEY,
+        candidate_topic TEXT NOT NULL,
+        matched_topic TEXT,
+        similarity REAL DEFAULT 0,
+        status TEXT NOT NULL,
+        verdict TEXT NOT NULL,
+        reason TEXT,
+        breakdown TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )`,
+      // Content DNA / Creative & Structural Traits (Batch 2)
+      `CREATE TABLE IF NOT EXISTS content_dna (
+        production_id TEXT PRIMARY KEY,
+        video_id TEXT,
+        content_type TEXT DEFAULT 'shorts',
+        traits TEXT NOT NULL,
+        metadata TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )`,
+      // Shorts Analytics Snapshots (Batch 2)
+      `CREATE TABLE IF NOT EXISTS shorts_analytics_snapshots (
+        id TEXT PRIMARY KEY,
+        video_id TEXT NOT NULL,
+        production_id TEXT,
+        measurement_window TEXT NOT NULL,
+        direct_metrics TEXT NOT NULL,
+        derived_metrics TEXT NOT NULL,
+        unavailable_metrics TEXT NOT NULL,
+        performance_score REAL DEFAULT 0,
+        captured_at TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(video_id, measurement_window)
+      )`,
+      // Trending Topic Candidates Pool (Batch 2)
+      `CREATE TABLE IF NOT EXISTS topic_candidates_pool (
+        id TEXT PRIMARY KEY,
+        topic TEXT NOT NULL,
+        sources TEXT NOT NULL,
+        trend_state TEXT NOT NULL,
+        trend_score REAL NOT NULL,
+        audience_fit_score REAL NOT NULL,
+        novelty_score REAL DEFAULT 1.0,
+        status TEXT NOT NULL,
+        rejection_reason TEXT,
+        production_id TEXT,
+        discovered_at TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
       )`
     ];
 
@@ -2914,6 +2965,263 @@ class Database {
     } catch (error) {
       return 'Unknown';
     }
+  }
+
+  // ==========================================
+  // BATCH 2: Topic Deduplication Methods
+  // ==========================================
+
+  async saveTopicDedupRecord(record) {
+    const id = record.id || this.generateId('dedup');
+    await this.executeQuery(
+      `INSERT INTO topic_dedup_log (
+        id, candidate_topic, matched_topic, similarity, status, verdict, reason, breakdown, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        record.candidateTopic || record.candidate_topic || '',
+        record.matchedTopic || record.matched_topic || null,
+        typeof record.similarity === 'number' ? record.similarity : 0,
+        record.status || 'unknown',
+        record.verdict || 'accepted',
+        record.reason || '',
+        JSON.stringify(record.breakdown || {}),
+        record.createdAt || record.created_at || new Date().toISOString()
+      ]
+    );
+    return this.getTopicDedupRecord(id);
+  }
+
+  async getTopicDedupRecord(id) {
+    const row = await this.getRow('SELECT * FROM topic_dedup_log WHERE id = ?', [id]);
+    if (!row) return null;
+    return {
+      ...row,
+      breakdown: JSON.parse(row.breakdown || '{}')
+    };
+  }
+
+  async getRecentTopicDedupRecords(limit = 50) {
+    const rows = await this.getAllRows('SELECT * FROM topic_dedup_log ORDER BY created_at DESC LIMIT ?', [limit]);
+    return rows.map(row => ({
+      ...row,
+      breakdown: JSON.parse(row.breakdown || '{}')
+    }));
+  }
+
+  // ==========================================
+  // BATCH 2: Content DNA Methods
+  // ==========================================
+
+  async saveContentDNA(dna) {
+    const productionId = dna.productionId || dna.production_id;
+    if (!productionId) throw new Error('productionId is required to save content DNA');
+
+    await this.executeQuery(
+      `INSERT OR REPLACE INTO content_dna (
+        production_id, video_id, content_type, traits, metadata, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM content_dna WHERE production_id = ?), CURRENT_TIMESTAMP), CURRENT_TIMESTAMP)`,
+      [
+        productionId,
+        dna.videoId || dna.video_id || null,
+        dna.contentType || dna.content_type || 'shorts',
+        JSON.stringify(dna.traits || {}),
+        JSON.stringify(dna.metadata || {}),
+        productionId
+      ]
+    );
+    return this.getContentDNA(productionId);
+  }
+
+  async getContentDNA(productionId) {
+    const row = await this.getRow('SELECT * FROM content_dna WHERE production_id = ?', [productionId]);
+    if (!row) return null;
+    return {
+      productionId: row.production_id,
+      videoId: row.video_id,
+      contentType: row.content_type,
+      traits: JSON.parse(row.traits || '{}'),
+      metadata: JSON.parse(row.metadata || '{}'),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  async getContentDNAByVideoId(videoId) {
+    const row = await this.getRow('SELECT * FROM content_dna WHERE video_id = ?', [videoId]);
+    if (!row) return null;
+    return {
+      productionId: row.production_id,
+      videoId: row.video_id,
+      contentType: row.content_type,
+      traits: JSON.parse(row.traits || '{}'),
+      metadata: JSON.parse(row.metadata || '{}'),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  async listContentDNA(options = {}) {
+    const limit = options.limit || 100;
+    const rows = await this.getAllRows('SELECT * FROM content_dna ORDER BY created_at DESC LIMIT ?', [limit]);
+    return rows.map(row => ({
+      productionId: row.production_id,
+      videoId: row.video_id,
+      contentType: row.content_type,
+      traits: JSON.parse(row.traits || '{}'),
+      metadata: JSON.parse(row.metadata || '{}'),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
+  }
+
+  // ==========================================
+  // BATCH 2: Shorts Analytics Snapshots Methods
+  // ==========================================
+
+  async saveShortsAnalyticsSnapshot(snapshot) {
+    const id = snapshot.id || this.generateId('snap');
+    const direct = JSON.stringify(snapshot.directMetrics || snapshot.direct_metrics || {});
+    const derived = JSON.stringify(snapshot.derivedMetrics || snapshot.derived_metrics || {});
+    const unavailable = JSON.stringify(snapshot.unavailableMetrics || snapshot.unavailable_metrics || {});
+    const perfScore = typeof snapshot.performanceScore === 'number' ? snapshot.performanceScore : 0;
+    const capturedAt = snapshot.capturedAt || snapshot.captured_at || new Date().toISOString();
+
+    await this.executeQuery(
+      `INSERT OR REPLACE INTO shorts_analytics_snapshots (
+        id, video_id, production_id, measurement_window, direct_metrics, derived_metrics, unavailable_metrics, performance_score, captured_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        snapshot.videoId || snapshot.video_id,
+        snapshot.productionId || snapshot.production_id || null,
+        snapshot.measurementWindow || snapshot.measurement_window || '24h',
+        direct,
+        derived,
+        unavailable,
+        perfScore,
+        capturedAt
+      ]
+    );
+    return this.getShortsAnalyticsSnapshot(snapshot.videoId || snapshot.video_id, snapshot.measurementWindow || snapshot.measurement_window || '24h');
+  }
+
+  async getShortsAnalyticsSnapshot(videoId, measurementWindow = '24h') {
+    const row = await this.getRow(
+      'SELECT * FROM shorts_analytics_snapshots WHERE video_id = ? AND measurement_window = ?',
+      [videoId, measurementWindow]
+    );
+    if (!row) return null;
+    return {
+      id: row.id,
+      videoId: row.video_id,
+      productionId: row.production_id,
+      measurementWindow: row.measurement_window,
+      directMetrics: JSON.parse(row.direct_metrics || '{}'),
+      derivedMetrics: JSON.parse(row.derived_metrics || '{}'),
+      unavailableMetrics: JSON.parse(row.unavailable_metrics || '{}'),
+      performanceScore: row.performance_score,
+      capturedAt: row.captured_at,
+      createdAt: row.created_at
+    };
+  }
+
+  async listShortsAnalyticsSnapshots(options = {}) {
+    let query = 'SELECT * FROM shorts_analytics_snapshots';
+    const params = [];
+    if (options.videoId) {
+      query += ' WHERE video_id = ?';
+      params.push(options.videoId);
+    }
+    query += ' ORDER BY captured_at DESC';
+    if (options.limit) {
+      query += ' LIMIT ?';
+      params.push(options.limit);
+    }
+    const rows = await this.getAllRows(query, params);
+    return rows.map(row => ({
+      id: row.id,
+      videoId: row.video_id,
+      productionId: row.production_id,
+      measurementWindow: row.measurement_window,
+      directMetrics: JSON.parse(row.direct_metrics || '{}'),
+      derivedMetrics: JSON.parse(row.derived_metrics || '{}'),
+      unavailableMetrics: JSON.parse(row.unavailable_metrics || '{}'),
+      performanceScore: row.performance_score,
+      capturedAt: row.captured_at,
+      createdAt: row.created_at
+    }));
+  }
+
+  // ==========================================
+  // BATCH 2: Topic Candidates Pool Methods
+  // ==========================================
+
+  async saveTopicCandidate(candidate) {
+    const id = candidate.id || this.generateId('cand');
+    await this.executeQuery(
+      `INSERT OR REPLACE INTO topic_candidates_pool (
+        id, topic, sources, trend_state, trend_score, audience_fit_score, novelty_score,
+        status, rejection_reason, production_id, discovered_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM topic_candidates_pool WHERE id = ?), CURRENT_TIMESTAMP))`,
+      [
+        id,
+        candidate.topic,
+        JSON.stringify(candidate.sources || []),
+        candidate.trendState || candidate.trend_state || 'unknown',
+        typeof candidate.trendScore === 'number' ? candidate.trendScore : 50,
+        typeof candidate.audienceFitScore === 'number' ? candidate.audienceFitScore : 50,
+        typeof candidate.noveltyScore === 'number' ? candidate.noveltyScore : 1.0,
+        candidate.status || 'candidate',
+        candidate.rejectionReason || candidate.rejection_reason || null,
+        candidate.productionId || candidate.production_id || null,
+        candidate.discoveredAt || candidate.discovered_at || new Date().toISOString(),
+        id
+      ]
+    );
+    return this.getTopicCandidate(id);
+  }
+
+  async getTopicCandidate(id) {
+    const row = await this.getRow('SELECT * FROM topic_candidates_pool WHERE id = ?', [id]);
+    if (!row) return null;
+    return {
+      ...row,
+      sources: JSON.parse(row.sources || '[]')
+    };
+  }
+
+  async listTopicCandidates(options = {}) {
+    let query = 'SELECT * FROM topic_candidates_pool';
+    const params = [];
+    if (options.status) {
+      query += ' WHERE status = ?';
+      params.push(options.status);
+    }
+    query += ' ORDER BY trend_score DESC';
+    if (options.limit) {
+      query += ' LIMIT ?';
+      params.push(options.limit);
+    }
+    const rows = await this.getAllRows(query, params);
+    return rows.map(row => ({
+      ...row,
+      sources: JSON.parse(row.sources || '[]')
+    }));
+  }
+
+  async getTopicCandidates(options = {}) {
+    return this.listTopicCandidates(options);
+  }
+
+  async updateTopicCandidateStatus(id, status, details = {}) {
+    await this.executeQuery(
+      `UPDATE topic_candidates_pool
+       SET status = ?, rejection_reason = ?, production_id = ?
+       WHERE id = ?`,
+      [status, details.rejectionReason || null, details.productionId || null, id]
+    );
+    return this.getTopicCandidate(id);
   }
 }
 
