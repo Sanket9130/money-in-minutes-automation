@@ -133,6 +133,7 @@ class AIVideoGenerator {
         method: 'POST',
         url: timestampUrl,
         data: data,
+        timeout: 45000,
         headers: {
           'Content-Type': 'application/json',
           'xi-api-key': this.elevenLabsApiKey
@@ -156,6 +157,7 @@ class AIVideoGenerator {
       method: 'POST',
       url: fallbackUrl,
       data: data,
+      timeout: 45000,
       headers: {
         'Accept': 'audio/mpeg',
         'Content-Type': 'application/json',
@@ -341,6 +343,7 @@ class AIVideoGenerator {
     const response = await axios({
       method: 'GET',
       url: url,
+      timeout: 60000,
       responseType: 'stream'
     });
 
@@ -847,6 +850,7 @@ class AIVideoGenerator {
     const response = await axios({
       method: 'GET',
       url: url,
+      timeout: 60000,
       responseType: 'stream'
     });
 

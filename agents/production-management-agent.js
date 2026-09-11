@@ -82,7 +82,7 @@ class ProductionManagementAgent {
         },
         scheduledPublishTime: this.calculatePublishTime(strategy),
         priority: this.calculatePriority(strategy),
-        estimatedDuration: script.duration,
+        estimatedDuration: script?.duration || 45,
         createdAt: new Date().toISOString()
       };
       productionData.jobId = jobId;

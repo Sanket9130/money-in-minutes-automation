@@ -67,16 +67,20 @@ class PublishingSchedulingAgent {
 
       const scheduleEntry = {
         productionId: productionData.id,
-        title: productionData.script.title,
+        title: productionData.script?.title || productionData.title || 'Untitled Video',
         publishTime: productionData.scheduledPublishTime,
         status: 'scheduled',
         priority: productionData.priority,
         metadata: {
-          seo: productionData.seo,
-          thumbnail: productionData.assets.thumbnail,
-          video: productionData.assets.finalVideo,
-          audio: productionData.assets.audio,
-          captions: productionData.assets.captions,
+          seo: productionData.seo || {
+            title: productionData.script?.title || productionData.title || 'Untitled Video',
+            description: productionData.script?.description || '',
+            tags: productionData.script?.tags || []
+          },
+          thumbnail: productionData.assets?.thumbnail || null,
+          video: productionData.assets?.finalVideo || (productionData.assets?.videoPath ? { path: productionData.assets.videoPath } : null),
+          audio: productionData.assets?.audio || null,
+          captions: productionData.assets?.captions || null,
           privacyStatus: productionData.privacyStatus || process.env.DEFAULT_PRIVACY_STATUS || 'private',
           containsSyntheticMedia: productionData.containsSyntheticMedia === true,
           contentType: productionData.contentType || 'long_form',
@@ -204,8 +208,13 @@ class PublishingSchedulingAgent {
   }
 
   async uploadToYouTube(scheduleEntry) {
-    const { metadata } = scheduleEntry;
-    const validation = assertValidYouTubeMetadata(metadata.seo);
+    const { metadata = {} } = scheduleEntry;
+    const rawSeo = metadata.seo || {
+      title: metadata.title || scheduleEntry.title,
+      description: metadata.description || '',
+      tags: metadata.tags || []
+    };
+    const validation = assertValidYouTubeMetadata(rawSeo);
     if (validation.warnings.length) {
       this.logger.warn(`YouTube metadata warnings: ${validation.warnings.join(' ')}`);
     }
@@ -230,7 +239,11 @@ class PublishingSchedulingAgent {
     };
     
     // Resolve the file before marking the network upload as attempted.
-    const videoStream = await this.getVideoStream(metadata.video.path);
+    const videoPath = metadata.video?.path || scheduleEntry.videoPath;
+    if (!videoPath) {
+      throw new Error(`Cannot upload schedule entry ${scheduleEntry.id || scheduleEntry.productionId}: video path is missing.`);
+    }
+    const videoStream = await this.getVideoStream(videoPath);
     scheduleEntry.uploadAttempted = true;
     const videoUpload = await this.youtube.videos.insert({
       part: 'snippet,status',

@@ -163,10 +163,15 @@ class ShortsPackagingService {
     if (!candidates.length) return 'Financial Breakdown (60 Seconds)';
 
     // Consult Content DNA learning if service exists
-    if (this.dnaService && typeof this.dnaService.recommendOptimalDNA === 'function') {
+    if (this.dnaService) {
       try {
-        const dnaRecommendation = await this.dnaService.recommendOptimalDNA();
-        if (dnaRecommendation.confidence === 'statistically_supported') {
+        let dnaRecommendation = null;
+        if (typeof this.dnaService.recommendOptimalDNAFromDB === 'function') {
+          dnaRecommendation = await this.dnaService.recommendOptimalDNAFromDB();
+        } else if (typeof this.dnaService.recommendOptimalDNA === 'function') {
+          dnaRecommendation = await this.dnaService.recommendOptimalDNA();
+        }
+        if (dnaRecommendation && dnaRecommendation.confidence === 'statistically_supported') {
           const preferredArchetype = dnaRecommendation.preferredTitleArchetype;
           const match = candidates.find(c => c.archetype === preferredArchetype);
           if (match) return match.title;
@@ -380,7 +385,13 @@ class ShortsPackagingService {
 
   cleanTitleBase(title = '') {
     return title
+      .replace(/#shorts\b/gi, '')
+      .replace(/^inside\s+/i, '')
+      .replace(/^why\s+(?:is\s+)?/i, '')
+      .replace(/^what\s+you\s+need\s+to\s+know\s+about\s+/i, '')
+      .replace(/^the\s+truth\s+about\s+/i, '')
       .replace(/^how\s+to\s+/i, '')
+      .replace(/^how\s+/i, '')
       .replace(/^the\s+/i, '')
       .replace(/[^\w\s$%,-]/g, '')
       .trim();

@@ -148,6 +148,12 @@ class CredentialManager {
     );
 
     oauth2Client.setCredentials(this.tokens.youtube);
+    oauth2Client.on('tokens', (newTokens) => {
+      this.tokens.youtube = { ...this.tokens.youtube, ...newTokens };
+      this.saveTokens().catch((err) => {
+        console.warn('Failed to auto-save refreshed YouTube tokens:', err.message);
+      });
+    });
     return oauth2Client;
   }
 
