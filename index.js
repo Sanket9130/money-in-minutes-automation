@@ -1411,6 +1411,15 @@ class YouTubeAutomationAgent {
     const { jobId = null, strategyContext = {} } = options;
     const profile = await this.db.getChannelProfile() || {};
     const lengthLabels = { short: '2-4 minutes', medium: '8-12 minutes', long: '15-20 minutes' };
+    const isShortRequest = Boolean(
+      length === 'short' ||
+      strategyContext?.format === 'short' ||
+      strategyContext?.format === 'shorts' ||
+      strategyContext?.aspectRatio === '9:16' ||
+      options?.isShort === true ||
+      options?.format === 'short' ||
+      options?.format === 'shorts'
+    );
 
     // Step 1: Strategy
     const strategy = await this.runGenerationStage(jobId, 'strategy', 10, async () => {
@@ -1423,6 +1432,12 @@ class YouTubeAutomationAgent {
       generated.requestedStyle = requestedStyle;
       generated.requestedLengthKey = length;
       generated.requestedLength = lengthLabels[length] || lengthLabels.medium;
+      if (isShortRequest) {
+        generated.isShort = true;
+        generated.format = 'short';
+        generated.aspectRatio = '9:16';
+        generated.contentType = 'short';
+      }
       generated.angle = strategyContext.angle || generated.angle;
       generated.planRationale = strategyContext.rationale || null;
       generated.targetAudience = strategyContext.audience || profile.target_audience || generated.targetAudience;
@@ -1471,7 +1486,16 @@ class YouTubeAutomationAgent {
       jobId,
       'production',
       62,
-      () => this.agents.production.processContent({ strategy, script, thumbnail, seo: seoData, jobId })
+      () => this.agents.production.processContent({
+        strategy,
+        script,
+        thumbnail,
+        seo: seoData,
+        jobId,
+        isShort: isShortRequest,
+        format: isShortRequest ? 'short' : 'long_form',
+        aspectRatio: isShortRequest ? '9:16' : '16:9'
+      })
     );
     this.logger.info('Production processing complete');
 

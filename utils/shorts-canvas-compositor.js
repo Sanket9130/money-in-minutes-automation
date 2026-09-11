@@ -1,12 +1,15 @@
 'use strict';
 
 const { ShortsVisualHook } = require('./shorts-visual-hook');
+const { CharacterEngine } = require('./character-engine');
+const { ShortsSceneDirector } = require('./shorts-scene-director');
+const { EnvironmentEngine } = require('./environment-engine');
 
 /**
  * Shorts Canvas Compositor
  *
  * Provides native vertical (9:16) 1080x1920 canvas geometry, YouTube Shorts safe zones,
- * and responsive HTML/CSS layouts for rendering high-retention vertical video slides.
+ * animated 3D environments, character presenter with visemes, and responsive HTML/CSS layouts.
  */
 
 const CANVAS_PRESETS = {
@@ -63,7 +66,16 @@ class ShortsCanvasCompositor {
       return CANVAS_PRESETS[ratio];
     }
 
-    if (options.isShort === true || options.format === 'shorts' || options.contentType === 'short' || options.contentType === 'shorts') {
+    if (
+      options.isShort === true ||
+      options.isShorts === true ||
+      options.format === 'short' ||
+      options.format === 'shorts' ||
+      options.contentType === 'short' ||
+      options.contentType === 'shorts' ||
+      options.requestedLengthKey === 'short' ||
+      options.requestedLength === 'short'
+    ) {
       return CANVAS_PRESETS['9:16'];
     }
 
@@ -110,7 +122,7 @@ class ShortsCanvasCompositor {
             align-items: center;
             justify-content: center;
             opacity: 0;
-            transition: opacity 2s ease-in-out;
+            transition: opacity 1.5s ease-in-out;
         }
         
         .slide.active {
@@ -120,12 +132,17 @@ class ShortsCanvasCompositor {
         .content {
             text-align: center;
             color: white;
-            max-width: 80%;
+            z-index: 2;
+            max-width: 1200px;
+            padding: 40px;
+            background: rgba(0, 0, 0, 0.6);
+            border-radius: 20px;
+            backdrop-filter: blur(10px);
         }
         
         h1 {
-            font-size: 72px;
-            margin-bottom: 30px;
+            font-size: 64px;
+            margin-bottom: 20px;
             text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
         }
         
@@ -136,8 +153,9 @@ class ShortsCanvasCompositor {
         }
         
         p {
-            font-size: 36px;
-            line-height: 1.4;
+            font-size: 32px;
+            line-height: 1.6;
+            margin-bottom: 15px;
             text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
         }
         
@@ -148,8 +166,8 @@ class ShortsCanvasCompositor {
             width: 100%;
             height: 100%;
             object-fit: cover;
+            z-index: 1;
             opacity: 0.3;
-            z-index: -1;
         }
         
         .particles {
@@ -159,27 +177,30 @@ class ShortsCanvasCompositor {
             width: 100%;
             height: 100%;
             overflow: hidden;
-            z-index: -1;
+            z-index: 1;
         }
         
         .particle {
             position: absolute;
-            background: rgba(255,255,255,0.8);
+            background: rgba(255, 255, 255, 0.5);
             border-radius: 50%;
-            animation: float 6s ease-in-out infinite;
+            animation: float 6s infinite linear;
         }
         
         @keyframes float {
-            0%, 100% { transform: translateY(0px); }
-            50% { transform: translateY(-20px); }
+            0% { transform: translateY(100vh) rotate(0deg); opacity: 0; }
+            50% { opacity: 1; }
+            100% { transform: translateY(-100px) rotate(360deg); opacity: 0; }
         }
       `;
     }
 
-    // Native 9:16 Vertical 1080x1920 with safe zones & mobile-optimized typography
+    // Vertical 1080x1920 (Native YouTube Shorts Layout)
     return `
         * {
             box-sizing: border-box;
+            margin: 0;
+            padding: 0;
         }
 
         body {
@@ -187,7 +208,7 @@ class ShortsCanvasCompositor {
             padding: 0;
             width: 1080px;
             height: 1920px;
-            background: linear-gradient(160deg, #0d1117 0%, #161b22 40%, #1f2937 100%);
+            background: radial-gradient(circle at 50% 30%, #1e293b 0%, #0f172a 65%, #020617 100%);
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
             overflow: hidden;
             color: #ffffff;
@@ -200,12 +221,28 @@ class ShortsCanvasCompositor {
             width: 1080px;
             height: 1920px;
             opacity: 0;
-            transition: opacity 1.5s cubic-bezier(0.4, 0, 0.2, 1);
+            transition: opacity 1.2s cubic-bezier(0.4, 0, 0.2, 1);
             overflow: hidden;
         }
 
         .slide.active {
             opacity: 1;
+        }
+
+        /* Animated Environment Background Layer */
+        .environment-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 1080px;
+            height: 1920px;
+            z-index: 1;
+        }
+
+        .environment-layer {
+            width: 1080px;
+            height: 1920px;
+            display: block;
         }
 
         /* YouTube Shorts Safe Zone Container */
@@ -217,9 +254,11 @@ class ShortsCanvasCompositor {
             right: ${SHORTS_SAFE_ZONE.right}px;
             display: flex;
             flex-direction: column;
-            justify-content: center;
+            justify-content: flex-start;
             align-items: center;
             pointer-events: none;
+            gap: 20px;
+            z-index: 5;
             ${showSafeZoneDebug ? 'outline: 2px dashed rgba(255, 68, 68, 0.85); background: rgba(255, 0, 0, 0.05);' : ''}
         }
 
@@ -227,100 +266,116 @@ class ShortsCanvasCompositor {
             width: 100%;
             max-width: ${SHORTS_SAFE_ZONE.maxWidth}px;
             text-align: center;
-            padding: 32px 24px;
-            background: rgba(13, 17, 23, 0.55);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
+            padding: 24px 20px;
+            background: rgba(15, 23, 42, 0.72);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
             border-radius: 28px;
-            border: 1px solid rgba(255, 255, 255, 0.14);
-            box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+            border: 1px solid rgba(255, 255, 255, 0.16);
+            box-shadow: 0 20px 48px rgba(0, 0, 0, 0.6);
             word-wrap: break-word;
             overflow-wrap: break-word;
+            z-index: 6;
         }
 
+        /* Header Badges */
         .badge {
             display: inline-flex;
             align-items: center;
             gap: 8px;
-            padding: 10px 24px;
+            padding: 8px 22px;
             border-radius: 9999px;
-            background: linear-gradient(135deg, rgba(99, 102, 241, 0.85), rgba(168, 85, 247, 0.85));
+            background: linear-gradient(135deg, rgba(99, 102, 241, 0.9), rgba(168, 85, 247, 0.9));
             color: #ffffff;
-            font-size: 22px;
-            font-weight: 700;
+            font-size: 20px;
+            font-weight: 800;
             text-transform: uppercase;
             letter-spacing: 2px;
-            margin-bottom: 24px;
-            box-shadow: 0 4px 14px rgba(99, 102, 241, 0.4);
+            margin-bottom: 16px;
+            box-shadow: 0 4px 16px rgba(99, 102, 241, 0.4);
+        }
+
+        .badge-gold {
+            background: linear-gradient(135deg, #F59E0B, #D97706);
+            color: #FFFFFF;
+            box-shadow: 0 4px 16px rgba(245, 158, 11, 0.45);
         }
 
         h1 {
-            font-size: 58px;
-            line-height: 1.22;
-            font-weight: 800;
-            margin: 0 0 20px 0;
+            font-size: 54px;
+            line-height: 1.2;
+            font-weight: 900;
+            margin: 0 0 16px 0;
             color: #ffffff;
-            text-shadow: 0 4px 16px rgba(0, 0, 0, 0.7);
+            text-shadow: 0 4px 16px rgba(0, 0, 0, 0.8);
             letter-spacing: -0.5px;
         }
 
         h2 {
-            font-size: 46px;
+            font-size: 42px;
             line-height: 1.25;
-            font-weight: 700;
-            margin: 0 0 20px 0;
+            font-weight: 800;
+            margin: 0 0 16px 0;
             color: #f3f4f6;
-            text-shadow: 0 4px 12px rgba(0, 0, 0, 0.7);
+            text-shadow: 0 4px 12px rgba(0, 0, 0, 0.8);
         }
 
         p {
-            font-size: 34px;
-            line-height: 1.45;
-            font-weight: 400;
-            margin: 0 0 16px 0;
-            color: #e5e7eb;
-            text-shadow: 0 2px 8px rgba(0, 0, 0, 0.65);
-        }
-
-        .card-list {
-            display: flex;
-            flex-direction: column;
-            gap: 16px;
-            width: 100%;
-            margin-top: 12px;
-        }
-
-        .card-item {
-            background: rgba(255, 255, 255, 0.08);
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            border-radius: 18px;
-            padding: 16px 20px;
-            text-align: left;
-            display: flex;
-            align-items: center;
-            gap: 16px;
-        }
-
-        .card-number {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            width: 44px;
-            height: 44px;
-            border-radius: 12px;
-            background: #6366f1;
-            color: #ffffff;
-            font-size: 24px;
-            font-weight: 800;
-            flex-shrink: 0;
-        }
-
-        .card-text {
             font-size: 30px;
-            line-height: 1.35;
+            line-height: 1.4;
             font-weight: 500;
-            color: #ffffff;
-            margin: 0;
+            margin: 0 0 14px 0;
+            color: #e2e8f0;
+            text-shadow: 0 2px 8px rgba(0, 0, 0, 0.7);
+        }
+
+        /* Character Presenter Layer */
+        .character-layer {
+            position: absolute;
+            bottom: 0px;
+            z-index: 10;
+            pointer-events: none;
+            filter: drop-shadow(0 16px 32px rgba(0,0,0,0.6));
+        }
+
+        .character-pos-right {
+            right: -20px;
+        }
+
+        .character-pos-left {
+            left: -20px;
+        }
+
+        .character-pos-center {
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        /* Hero Callout Cards */
+        .hook-hero-card, .outro-hero-card {
+            background: rgba(15, 23, 42, 0.8);
+            border: 2px solid rgba(245, 158, 11, 0.5);
+            border-radius: 32px;
+            padding: 36px 28px;
+            text-align: center;
+            box-shadow: 0 24px 60px rgba(0,0,0,0.7), 0 0 40px rgba(245, 158, 11, 0.2);
+            backdrop-filter: blur(24px);
+        }
+
+        .hook-badge, .outro-brand-pill {
+            display: inline-block;
+            padding: 8px 24px;
+            background: linear-gradient(135deg, #EF4444, #F59E0B);
+            color: #FFFFFF;
+            font-size: 22px;
+            font-weight: 900;
+            border-radius: 9999px;
+            letter-spacing: 2px;
+            margin-bottom: 20px;
+        }
+
+        .outro-brand-pill {
+            background: linear-gradient(135deg, #F59E0B, #10B981);
         }
 
         .background-image {
@@ -331,9 +386,9 @@ class ShortsCanvasCompositor {
             height: 100%;
             object-fit: cover;
             object-position: center;
-            opacity: 0.38;
-            z-index: -1;
-            filter: contrast(105%) brightness(95%);
+            opacity: 0.32;
+            z-index: 2;
+            filter: contrast(110%) brightness(85%);
         }
 
         .gradient-overlay {
@@ -342,8 +397,8 @@ class ShortsCanvasCompositor {
             left: 0;
             width: 100%;
             height: 100%;
-            background: radial-gradient(circle at center, transparent 30%, rgba(0, 0, 0, 0.65) 100%);
-            z-index: -1;
+            background: radial-gradient(circle at center, transparent 20%, rgba(2, 6, 23, 0.75) 100%);
+            z-index: 3;
         }
 
         .particles {
@@ -353,12 +408,12 @@ class ShortsCanvasCompositor {
             width: 1080px;
             height: 1920px;
             overflow: hidden;
-            z-index: -1;
+            z-index: 4;
         }
 
         .particle {
             position: absolute;
-            background: rgba(255, 255, 255, 0.7);
+            background: rgba(245, 158, 11, 0.5);
             border-radius: 50%;
             animation: float 7s ease-in-out infinite;
         }
@@ -379,23 +434,9 @@ class ShortsCanvasCompositor {
     const isShorts = canvas.aspectRatio === '9:16';
     const css = this.generateCSS(canvas, options);
 
-    const titleSlide = isShorts
-      ? ((options.visualHook !== false && options.hook !== false)
-          ? ShortsVisualHook.createHookSlideHTML(script, visualAssets, options)
-          : `
-    <!-- Title Slide (Shorts Safe Zone) -->
-    <div class="slide active">
-        ${visualAssets[0] ? `<img class="background-image" src="${visualAssets[0]}" alt="" />` : ''}
-        <div class="gradient-overlay"></div>
-        <div class="safe-zone">
-            <div class="content">
-                <div class="badge">🔥 Short Takeaway</div>
-                <h1>${escapeHTML(script.title || 'Untitled Story')}</h1>
-                <p>Watch till the end for the full breakdown</p>
-            </div>
-        </div>
-    </div>`)
-      : `
+    if (!isShorts) {
+      // 16:9 Horizontal Slideshow
+      const titleSlide = `
     <!-- Title Slide (Horizontal) -->
     <div class="slide active">
         ${visualAssets[0] ? `<img class="background-image" src="${visualAssets[0]}" />` : ''}
@@ -405,23 +446,9 @@ class ShortsCanvasCompositor {
         </div>
     </div>`;
 
-    const contentSlides = this.generateContentSlides(script, visualAssets, canvas);
+      const contentSlides = this.generateContentSlides(script, visualAssets, canvas);
 
-    const outroSlide = isShorts
-      ? `
-    <!-- Outro Slide (Shorts Safe Zone) -->
-    <div class="slide">
-        ${visualAssets[visualAssets.length - 1] ? `<img class="background-image" src="${visualAssets[visualAssets.length - 1]}" alt="" />` : ''}
-        <div class="gradient-overlay"></div>
-        <div class="safe-zone">
-            <div class="content">
-                <div class="badge">✨ Subscribe ✨</div>
-                <h2>Follow for Daily Shorts</h2>
-                <p>New insights every day</p>
-            </div>
-        </div>
-    </div>`
-      : `
+      const outroSlide = `
     <!-- Subscribe Slide (Horizontal) -->
     <div class="slide">
         <div class="content">
@@ -430,34 +457,116 @@ class ShortsCanvasCompositor {
         </div>
     </div>`;
 
-    return `<!DOCTYPE html>
+      return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
     <title>${escapeHTML(script.title || 'Video')}</title>
-    <style>
-${css}
-    </style>
+    <style>${css}</style>
 </head>
 <body>
     <div class="particles"></div>
     ${titleSlide}
     ${contentSlides.join('\n')}
     ${outroSlide}
+    <script>
+        let currentSlide = 0;
+        const slides = document.querySelectorAll('.slide');
+        function advanceAnimation() {
+            if (!slides.length) return;
+            slides[currentSlide].classList.remove('active');
+            currentSlide = (currentSlide + 1) % slides.length;
+            slides[currentSlide].classList.add('active');
+        }
+        window.advanceAnimation = advanceAnimation;
+    </script>
+</body>
+</html>`;
+    }
+
+    // 9:16 Vertical Shorts: Directed High-Retention Character Experience
+    const director = new ShortsSceneDirector(options);
+    const charEngine = new CharacterEngine(options);
+    const envEngine = new EnvironmentEngine();
+    const scenes = director.directScript(script, options);
+
+    const slideMarkups = scenes.map((scene, index) => {
+      const isFirst = index === 0;
+      if (isFirst && options.visualHook !== false && options.hook !== false) {
+        return ShortsVisualHook.createHookSlideHTML(script, visualAssets, options);
+      }
+
+      const assetIndex = visualAssets.length > 0 ? index % visualAssets.length : -1;
+      const asset = assetIndex >= 0 ? visualAssets[assetIndex] : null;
+
+      // Render thematic 3D animated environment background
+      const envSVG = envEngine.renderEnvironmentSVG(scene.environment?.type, {
+        sceneIndex: index,
+        width: 1080,
+        height: 1920
+      });
+
+      // Render articulated character presenter with speech visemes
+      const charSVG = scene.character?.present
+        ? charEngine.renderCharacterSVG(scene.character.pose, {
+            position: scene.character.position,
+            scale: scene.character.scale || 1.0,
+            width: 420,
+            height: 600,
+            viseme: 'open_wide',
+            mouthOpenness: 0.75,
+            isBlinking: false,
+            headBobY: index % 2 === 0 ? 2 : -2
+          })
+        : '';
+
+      const charClass = scene.character?.position === 'left'
+        ? 'character-pos-left'
+        : (scene.character?.position === 'center' ? 'character-pos-center' : 'character-pos-right');
+
+      return `
+    <!-- Scene Slide ${index + 1}: ${scene.type} (Shorts Safe Zone) -->
+    <div class="slide ${isFirst ? 'active' : ''}" data-scene-id="${scene.sceneId}">
+        <div class="environment-container">${envSVG}</div>
+        ${asset ? `<img class="background-image" src="${asset}" alt="" />` : ''}
+        <div class="gradient-overlay"></div>
+        <div class="safe-zone">
+            <div class="content">
+                <div class="badge badge-gold">${escapeHTML(scene.headline || 'MONEY IN MINUTES')}</div>
+                <h2>${escapeHTML(scene.headline || '')}</h2>
+                ${scene.financialGraphic?.markup || `<p>${escapeHTML(scene.narration || '')}</p>`}
+            </div>
+            ${charSVG ? `<div class="character-layer ${charClass}">${charSVG}</div>` : ''}
+        </div>
+    </div>`;
+    });
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>${escapeHTML(script.title || 'Short')}</title>
+    <style>
+${css}
+    </style>
+</head>
+<body>
+    <div class="particles"></div>
+    ${slideMarkups.join('\n')}
 
     <script>
         function createParticles() {
             const container = document.querySelector('.particles');
             if (!container) return;
-            const count = ${isShorts ? 30 : 20};
+            const count = 35;
             for (let i = 0; i < count; i++) {
                 const particle = document.createElement('div');
                 particle.className = 'particle';
                 particle.style.left = Math.random() * 100 + '%';
                 particle.style.top = Math.random() * 100 + '%';
-                particle.style.width = (Math.random() * 5 + 2) + 'px';
+                particle.style.width = (Math.random() * 6 + 3) + 'px';
                 particle.style.height = particle.style.width;
-                particle.style.animationDelay = Math.random() * 6 + 's';
+                particle.style.animationDelay = Math.random() * 5 + 's';
                 container.appendChild(particle);
             }
         }
@@ -480,11 +589,10 @@ ${css}
   }
 
   /**
-   * Generates slide markup for each section of the script.
+   * Generates slide markup for each section of the script (horizontal mode compatibility).
    */
-  static generateContentSlides(script, visualAssets = [], canvas = CANVAS_PRESETS['16:9']) {
+  static generateContentSlides(script, visualAssets = [], _canvas = CANVAS_PRESETS['16:9']) {
     const slides = [];
-    const isShorts = canvas.aspectRatio === '9:16';
     const sections = script.mainContent?.sections || [];
 
     sections.forEach((section, index) => {
@@ -493,20 +601,7 @@ ${css}
         : -1;
       const asset = assetIndex >= 0 ? visualAssets[assetIndex] : null;
 
-      if (isShorts) {
-        slides.push(`
-    <div class="slide">
-        ${asset ? `<img class="background-image" src="${asset}" alt="" />` : ''}
-        <div class="gradient-overlay"></div>
-        <div class="safe-zone">
-            <div class="content">
-                <h2>${escapeHTML(section.title || `Point ${index + 1}`)}</h2>
-                ${this.formatShortsSectionContent(section)}
-            </div>
-        </div>
-    </div>`);
-      } else {
-        slides.push(`
+      slides.push(`
     <div class="slide">
         ${asset ? `<img class="background-image" src="${asset}" />` : ''}
         <div class="content">
@@ -514,40 +609,9 @@ ${css}
             ${this.formatHorizontalSectionContent(section)}
         </div>
     </div>`);
-      }
     });
 
     return slides;
-  }
-
-  static formatShortsSectionContent(section) {
-    if (section.items && Array.isArray(section.items) && section.items.length > 0) {
-      return `<div class="card-list">` +
-        section.items.slice(0, 3).map((item, idx) => `
-            <div class="card-item">
-                <div class="card-number">${item.number || idx + 1}</div>
-                <div class="card-text">${escapeHTML(item.title || item.text || String(item))}</div>
-            </div>`).join('') +
-        `</div>`;
-    }
-
-    if (section.steps && Array.isArray(section.steps) && section.steps.length > 0) {
-      return `<div class="card-list">` +
-        section.steps.slice(0, 3).map((step, idx) => `
-            <div class="card-item">
-                <div class="card-number">${idx + 1}</div>
-                <div class="card-text">${escapeHTML(step.title || step.description || String(step))}</div>
-            </div>`).join('') +
-        `</div>`;
-    }
-
-    if (typeof section.content === 'string' && section.content.trim()) {
-      const text = section.content.trim();
-      const truncated = text.length > 180 ? `${text.slice(0, 180)}…` : text;
-      return `<p>${escapeHTML(truncated)}</p>`;
-    }
-
-    return '<p>Essential key takeaway</p>';
   }
 
   static formatHorizontalSectionContent(section) {

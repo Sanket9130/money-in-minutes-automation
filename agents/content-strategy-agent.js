@@ -268,8 +268,32 @@ class ContentStrategyAgent {
     try {
       let topic, angle, targetAudience, contentType;
 
+      // Consult Content DNA learning recommendations if available
+      let dnaRecommendation = null;
+      try {
+        dnaRecommendation = typeof this.dnaService.recommendOptimalDNAFromDB === 'function'
+          ? await this.dnaService.recommendOptimalDNAFromDB()
+          : this.dnaService.recommendOptimalDNA();
+      } catch (err) {
+        this.logger.debug('DNA recommendation unavailable:', err.message);
+      }
+
       const aiStrategy = await this.generateContentStrategyWithAI(requestedTopic);
       if (aiStrategy) {
+        const recentTopics = this.getRecentTopics();
+        const dedupResult = await this.dedupService.checkDeduplication(aiStrategy.topic, recentTopics);
+        if (dedupResult.status === 'duplicate' || dedupResult.verdict === 'rejected') {
+          this.logger.warn(`AI topic "${aiStrategy.topic}" flagged as duplicate/similar (similarity: ${dedupResult.similarity}). Matched: "${dedupResult.matchedTopic}"`);
+        }
+        const matchingTrend = (this.trendingTopics || []).find(t => t.topic === aiStrategy.topic) || (this.trendingTopics || [])[0];
+        const researchSources = Array.isArray(aiStrategy.researchSources) && aiStrategy.researchSources.length > 0
+          ? aiStrategy.researchSources
+          : (matchingTrend?.evidence || []);
+
+        aiStrategy.dedupAnalysis = dedupResult;
+        aiStrategy.researchSources = researchSources;
+        aiStrategy.dnaRecommendations = dnaRecommendation?.confidence !== 'insufficient_sample' ? dnaRecommendation : null;
+
         await this.db.saveContentStrategy(aiStrategy);
         this.logger.info(`Generated AI strategy for: ${aiStrategy.topic}`);
         return aiStrategy;
@@ -301,16 +325,6 @@ class ContentStrategyAgent {
 
       // Select content type
       contentType = this.selectContentType(topic);
-
-      // Consult Content DNA learning recommendations if available
-      let dnaRecommendation = null;
-      try {
-        dnaRecommendation = typeof this.dnaService.recommendOptimalDNAFromDB === 'function'
-          ? await this.dnaService.recommendOptimalDNAFromDB()
-          : this.dnaService.recommendOptimalDNA();
-      } catch (err) {
-        this.logger.debug('DNA recommendation unavailable:', err.message);
-      }
 
       // Gather research sources from discovery evidence if available
       const matchingTrend = (this.trendingTopics || []).find(t => t.topic === topic);

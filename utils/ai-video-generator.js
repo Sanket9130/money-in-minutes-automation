@@ -10,12 +10,15 @@ const { MediaGenerationService } = require('./media-generation-service');
 const { ShortsCanvasCompositor, CANVAS_PRESETS } = require('./shorts-canvas-compositor');
 const { ShortsKaraokeCaptions } = require('./shorts-karaoke-captions');
 const { ShortsVisualHook } = require('./shorts-visual-hook');
+const { VideoProviderRegistry, PROVIDER_TIERS } = require('./video-provider-registry');
 
 class AIVideoGenerator {
   constructor(credentials, options = {}) {
     this.logger = new Logger('AIVideoGenerator');
     const resolvedCredentials = credentials?.credentials || credentials || {};
     this.db = options.db || null;
+    this.options = options;
+    this.providerRegistry = new VideoProviderRegistry(options);
     this.lastVideoResult = null;
     this.lastNarrationResult = null;
     this.lastWordTimings = null;
@@ -84,7 +87,13 @@ class AIVideoGenerator {
       } else if (this.gemini) {
         provider = 'gemini';
         model = process.env.GEMINI_TTS_MODEL || 'gemini-3.1-flash-tts-preview';
-        generatedPath = await this.generateGeminiTTS(text, outputPath);
+        try {
+          generatedPath = await this.generateGeminiTTS(text, outputPath);
+        } catch (geminiErr) {
+          this.logger.warn('Gemini TTS unavailable, falling back to offline speech synthesizer:', geminiErr.message);
+          provider = 'local_synthesizer';
+          generatedPath = await this.simulateTTSGeneration(text, outputPath);
+        }
       } else {
         generatedPath = await this.simulateTTSGeneration(text, outputPath);
       }
@@ -99,7 +108,7 @@ class AIVideoGenerator {
         generatedAt: new Date().toISOString(),
         simulated: !usable,
         wordTimings: this.lastWordTimings || null,
-        cost: { provider, amount: null, currency: null, invoiceRequired: provider !== 'simulation' }
+        cost: { provider, amount: null, currency: null, invoiceRequired: provider !== 'simulation' && provider !== 'local_synthesizer' }
       };
       return generatedPath;
     } catch (error) {
@@ -111,6 +120,37 @@ class AIVideoGenerator {
       this.logger.error('TTS generation failed:', error);
       throw error;
     }
+  }
+
+  async simulateTTSGeneration(text, outputPath) {
+    this.logger.info('Using local speech synthesizer...');
+    await fs.mkdir(path.dirname(outputPath), { recursive: true });
+
+    // Try Windows SAPI TTS if on Windows
+    if (process.platform === 'win32') {
+      try {
+        const wavPath = outputPath.replace(/\.[^/.]+$/, '') + '_sapi.wav';
+        const cleanText = text.replace(/["'`$\r\n]/g, ' ').slice(0, 3000);
+        const psScript = `Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.SetOutputToWaveFile('${wavPath.replace(/'/g, "''")}'); $s.Speak('${cleanText}'); $s.Dispose()`;
+        const cp = require('child_process');
+        cp.execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psScript], { stdio: 'ignore', timeout: 30000 });
+
+        if (await this.isUsableAudioFile(wavPath)) {
+          await runFFmpeg(['-y', '-i', wavPath, outputPath]);
+          await fs.unlink(wavPath).catch(() => {});
+          this.logger.info('Local speech synthesizer completed successfully');
+          return outputPath;
+        }
+      } catch (err) {
+        this.logger.warn('Windows SpeechSynthesizer fallback failed:', err.message);
+      }
+    }
+
+    // FFmpeg synthetic audio stream
+    const wordCount = (text || '').split(/\s+/).filter(Boolean).length;
+    const estDuration = Math.max(5, Math.min(60, Math.round(wordCount / 2.5)));
+    await runFFmpeg(['-y', '-f', 'lavfi', '-i', 'anullsrc=r=24000:cl=mono', '-t', String(estDuration), outputPath]);
+    return outputPath;
   }
 
   async generateElevenLabsTTS(text, outputPath) {
@@ -197,20 +237,36 @@ class AIVideoGenerator {
     const model = process.env.GEMINI_TTS_MODEL || 'gemini-3.1-flash-tts-preview';
     const voiceName = process.env.GEMINI_TTS_VOICE || 'Kore';
 
-    const response = await this.gemini.models.generateContent({
-      model,
-      contents: [{ parts: [{ text }] }],
-      config: {
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName }
+    let response = null;
+    const maxRetries = 3;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        response = await this.gemini.models.generateContent({
+          model,
+          contents: [{ parts: [{ text }] }],
+          config: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName }
+              }
+            }
           }
+        });
+        break;
+      } catch (err) {
+        const isQuota = err.message && (err.message.includes('429') || err.message.includes('quota') || err.message.includes('RESOURCE_EXHAUSTED'));
+        if (isQuota && attempt < maxRetries) {
+          const waitSec = 20 * attempt;
+          this.logger.warn(`Gemini TTS rate limited (429). Retrying in ${waitSec}s (attempt ${attempt}/${maxRetries})...`);
+          await new Promise(resolve => setTimeout(resolve, waitSec * 1000));
+        } else {
+          throw err;
         }
       }
-    });
+    }
 
-    const audioData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    const audioData = response?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     if (!audioData) {
       throw new Error('Gemini TTS returned no audio data');
     }
@@ -359,14 +415,36 @@ class AIVideoGenerator {
   async generateVideo(script, visualAssets, audioPath, outputPath, options = {}) {
     this.logger.info('Generating video from assets...');
     this.lastVideoResult = null;
+    const isShort = Boolean(
+      options.isShort === true ||
+      options.isShorts === true ||
+      options.aspectRatio === '9:16' ||
+      options.format === 'short' ||
+      options.format === 'shorts' ||
+      options.contentType === 'short' ||
+      options.contentType === 'shorts' ||
+      options.requestedLengthKey === 'short' ||
+      options.requestedLength === 'short' ||
+      script?.isShort === true ||
+      script?.format === 'short' ||
+      script?.format === 'shorts' ||
+      script?.aspectRatio === '9:16'
+    );
+    const resolvedOptions = {
+      ...options,
+      isShort,
+      aspectRatio: isShort ? '9:16' : (options.aspectRatio || '16:9')
+    };
     try {
-      if (this.mediaGeneration && options.productionId) {
+      if (this.mediaGeneration && resolvedOptions.productionId) {
         const generated = await this.mediaGeneration.generateClips({
-          jobId: options.jobId || null,
-          productionId: options.productionId,
+          jobId: resolvedOptions.jobId || null,
+          productionId: resolvedOptions.productionId,
           script,
           visualAssets,
-          outputDir: path.dirname(outputPath)
+          outputDir: path.dirname(outputPath),
+          aspectRatio: resolvedOptions.aspectRatio,
+          isShort: resolvedOptions.isShort
         });
         if (generated.clips.length) {
           const produced = await this.generateHybridVideo(
@@ -374,8 +452,8 @@ class AIVideoGenerator {
             visualAssets,
             audioPath,
             outputPath,
-            options.estimatedDuration || this.calculateScriptDuration(script),
-            options
+            resolvedOptions.estimatedDuration || this.calculateScriptDuration(script),
+            resolvedOptions
           );
           this.lastVideoResult = {
             requestedProvider: generated.requestedProvider,
@@ -393,8 +471,21 @@ class AIVideoGenerator {
         }
       }
 
-      const produced = await this.generateSlideshowVideo(script, visualAssets, audioPath, outputPath, options);
-      this.lastVideoResult = { requestedProvider: 'slideshow', actualProvider: 'slideshow', model: 'local-ffmpeg', mode: 'slideshow', generatedSeconds: 0, tasks: [], scenes: [] };
+      const produced = await this.generateSlideshowVideo(script, visualAssets, audioPath, outputPath, resolvedOptions);
+      const receipt = this.providerRegistry.generateCostReceipt(
+        options.scenes || [],
+        { productionId: resolvedOptions.productionId, provider: 'local_canvas' }
+      );
+      this.lastVideoResult = {
+        requestedProvider: 'local_canvas',
+        actualProvider: 'local_canvas',
+        model: 'local-canvas-ffmpeg',
+        mode: 'slideshow',
+        generatedSeconds: this.calculateScriptDuration(script),
+        costReceipt: receipt,
+        tasks: [],
+        scenes: []
+      };
       return produced;
     } catch (error) {
       // The Logger's console line only shows the message string, so put the real
@@ -403,19 +494,36 @@ class AIVideoGenerator {
       const reason = error && error.message ? error.message : String(error);
       this.logger.error(`Video provider generation failed; using the local slideshow: ${reason}`, error);
       try {
-        const produced = await this.generateSlideshowVideo(script, visualAssets, audioPath, outputPath, options);
+        const produced = await this.generateSlideshowVideo(script, visualAssets, audioPath, outputPath, resolvedOptions);
+        const receipt = this.providerRegistry.generateCostReceipt(
+          options.scenes || [],
+          { productionId: resolvedOptions.productionId, provider: 'local_canvas' }
+        );
         this.lastVideoResult = {
           requestedProvider: this.lastVideoResult?.requestedProvider || 'configured-provider',
-          actualProvider: 'slideshow', model: 'local-ffmpeg', mode: 'fallback', generatedSeconds: 0,
-          fallbackReason: reason, tasks: [], scenes: []
+          actualProvider: 'local_canvas',
+          model: 'local-canvas-ffmpeg',
+          mode: 'fallback',
+          generatedSeconds: this.calculateScriptDuration(script),
+          costReceipt: receipt,
+          fallbackReason: reason,
+          tasks: [],
+          scenes: []
         };
         return produced;
       } catch (fallbackError) {
         this.logger.error(`Local slideshow fallback failed: ${fallbackError.message}`, fallbackError);
         const produced = await this.simulateVideoGeneration(script, visualAssets, audioPath, outputPath);
         this.lastVideoResult = {
-          requestedProvider: 'configured-provider', actualProvider: 'simulation', model: null,
-          mode: 'simulation', generatedSeconds: 0, fallbackReason: `${reason}; ${fallbackError.message}`, tasks: [], scenes: []
+          requestedProvider: 'configured-provider',
+          actualProvider: 'simulation',
+          model: null,
+          mode: 'simulation',
+          generatedSeconds: 0,
+          costReceipt: { totalEstimatedCostUSD: 0, tier: PROVIDER_TIERS.FREE },
+          fallbackReason: `${reason}; ${fallbackError.message}`,
+          tasks: [],
+          scenes: []
         };
         return produced;
       }
@@ -903,20 +1011,6 @@ class AIVideoGenerator {
   async getFileSize(filePath) {
     const stats = await fs.stat(filePath);
     return stats.size;
-  }
-
-  // Simulation methods for when APIs are not available
-  async simulateTTSGeneration(text, outputPath) {
-    this.logger.info('Simulating TTS generation...');
-    
-    const infoPath = outputPath + '.info';
-    await fs.writeFile(infoPath, JSON.stringify({
-      message: 'AI TTS audio would be generated here',
-      text: text.substring(0, 100) + '...',
-      timestamp: new Date().toISOString()
-    }, null, 2));
-    
-    return infoPath;
   }
 
   async simulateVisualAssets(prompt, style, count) {

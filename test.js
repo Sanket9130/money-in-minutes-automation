@@ -74,7 +74,15 @@ class SystemTest {
       { name: 'Reply Approval and Posting', test: () => this.testReplyApprovalAndPosting() },
       { name: 'Engagement AI Provider Wiring', test: () => this.testEngagementAIProviderWiring() },
       { name: 'Engagement Sync Schedule', test: () => this.testEngagementSyncSchedule() },
-      { name: 'Growth Experiment Refresh Schedule', test: () => this.testGrowthExperimentRefreshSchedule() }
+      { name: 'Growth Experiment Refresh Schedule', test: () => this.testGrowthExperimentRefreshSchedule() },
+      { name: 'Character Engine & Consistent Presenter', test: () => this.testCharacterEngine() },
+      { name: 'Finance Graphics & Motion Compositor', test: () => this.testFinanceGraphicsCompositor() },
+      { name: 'LipSync Engine & Viseme Morphing', test: () => this.testLipSyncEngine() },
+      { name: 'Environment Engine & Parallax Worlds', test: () => this.testEnvironmentEngine() },
+      { name: 'Shorts Scene Director & Pacing', test: () => this.testShortsSceneDirector() },
+      { name: 'Visual Quality Checker & Scoring', test: () => this.testVisualQualityChecker() },
+      { name: 'Video Provider Registry & Free-First Governance', test: () => this.testVideoProviderRegistry() },
+      { name: 'Frame-Sampling Visual QA Gate', test: () => this.testFrameSamplingVisualQA() }
     ];
 
     let passed = 0;
@@ -2584,8 +2592,28 @@ class SystemTest {
       throw new Error('ShortsCanvasCompositor did not resolve 1920x1080 for 16:9');
     }
     const shortByOption = ShortsCanvasCompositor.resolveCanvas({ isShort: true });
-    if (shortByOption.aspectRatio !== '9:16') {
-      throw new Error('isShort flag did not resolve to 9:16 canvas');
+    if (shortByOption.aspectRatio !== '9:16' || shortByOption.width !== 1080 || shortByOption.height !== 1920) {
+      throw new Error('isShort flag did not resolve to 1080x1920 (9:16) canvas');
+    }
+    const shortByFormat = ShortsCanvasCompositor.resolveCanvas({ format: 'short' });
+    if (shortByFormat.aspectRatio !== '9:16' || shortByFormat.width !== 1080 || shortByFormat.height !== 1920) {
+      throw new Error('format=short did not resolve to 1080x1920 (9:16) canvas');
+    }
+    const shortByLength = ShortsCanvasCompositor.resolveCanvas({ requestedLengthKey: 'short' });
+    if (shortByLength.aspectRatio !== '9:16' || shortByLength.width !== 1080 || shortByLength.height !== 1920) {
+      throw new Error('requestedLengthKey=short did not resolve to 1080x1920 (9:16) canvas');
+    }
+
+    const { ProductionManagementAgent } = require('./agents/production-management-agent');
+    const prodAgent = new ProductionManagementAgent();
+    if (!prodAgent.isShortProduction({ strategy: { requestedLengthKey: 'short' } })) {
+      throw new Error('isShortProduction failed to detect Short from strategy.requestedLengthKey');
+    }
+    if (!prodAgent.isShortProduction({ format: 'short' })) {
+      throw new Error('isShortProduction failed to detect Short from format');
+    }
+    if (!prodAgent.isShortProduction({ aspectRatio: '9:16' })) {
+      throw new Error('isShortProduction failed to detect Short from aspectRatio');
     }
 
     const safeZone = ShortsCanvasCompositor.SHORTS_SAFE_ZONE;
@@ -4774,8 +4802,12 @@ class SystemTest {
     // (manager.credentials), the shape the walkthrough writes to credentials.json.
     // Passing the CredentialManager itself leaves the engagement studio permanently
     // in fallback mode on installs with no provider environment variables.
-    const savedEnv = process.env.OPENAI_API_KEY;
-    delete process.env.OPENAI_API_KEY;
+    const envKeys = ['OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_AI_API_KEY', 'MOONSHOT_API_KEY', 'MIMO_API_KEY', 'GLM_API_KEY'];
+    const saved = {};
+    for (const key of envKeys) {
+      saved[key] = process.env[key];
+      delete process.env[key];
+    }
     try {
       const configured = new AITextService({
         aiProvider: { provider: 'openai', apiKey: 'test-key', model: 'gpt-5.6' }
@@ -4791,8 +4823,10 @@ class SystemTest {
         throw new Error('A CredentialManager-shaped argument must not look configured; index.js has to unwrap it');
       }
     } finally {
-      if (savedEnv === undefined) delete process.env.OPENAI_API_KEY;
-      else process.env.OPENAI_API_KEY = savedEnv;
+      for (const key of envKeys) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
     }
   }
 
@@ -4848,6 +4882,262 @@ class SystemTest {
     }
     const noService = new DailyAutomation({}, {}, {});
     await noService.refreshGrowthExperiments();
+  }
+
+  // =========================================================================
+  // PREMIUM CHARACTER-BASED VISUAL ENGINE TESTS
+  // =========================================================================
+
+  async testCharacterEngine() {
+    const { CharacterEngine, CHARACTER_PROFILE, ALLOWED_POSES } = require('./utils/character-engine');
+
+    if (!CHARACTER_PROFILE.id || CHARACTER_PROFILE.name !== 'Alex') {
+      throw new Error('Character profile ID or name is invalid');
+    }
+    if (!Array.isArray(ALLOWED_POSES) || ALLOWED_POSES.length < 10) {
+      throw new Error('Allowed poses registry is insufficient');
+    }
+
+    const engine = new CharacterEngine();
+
+    // 1. Validate Pose Normalization
+    if (engine.normalizePose('SHOCKED') !== 'shocked') {
+      throw new Error('normalizePose failed case insensitivity');
+    }
+    if (engine.normalizePose('invalid_pose') !== 'explaining') {
+      throw new Error('normalizePose failed default fallback');
+    }
+
+    // 2. Validate AI Prompt Generator
+    const prompt = engine.generateAIPrompt('pointing_side', { topic: 'Costco margins' });
+    if (!prompt.includes('Alex') || !prompt.includes('navy') || !prompt.includes('9:16')) {
+      throw new Error('generateAIPrompt does not maintain consistent character descriptors');
+    }
+
+    // 3. Validate SVG Character Generation
+    const svgRight = engine.generateCharacterSVG('pointing_side', { position: 'right' });
+    if (!svgRight.includes('<svg') || !svgRight.includes('character-pose-pointing_side') || !svgRight.includes('character-pos-right')) {
+      throw new Error('generateCharacterSVG failed right-positioned pointing SVG');
+    }
+    const svgLeft = engine.generateCharacterSVG('shocked', { position: 'left' });
+    if (!svgLeft.includes('character-pose-shocked') || !svgLeft.includes('character-pos-left')) {
+      throw new Error('generateCharacterSVG failed left-positioned shocked SVG');
+    }
+  }
+
+  async testFinanceGraphicsCompositor() {
+    const { FinanceGraphicsCompositor } = require('./utils/finance-graphics-compositor');
+    const compositor = new FinanceGraphicsCompositor();
+
+    // 1. Membership Card
+    const card = compositor.renderMembershipCard({ title: 'COSTCO MEMBER', fee: '$65 / YEAR' });
+    if (!card.includes('COSTCO MEMBER') || !card.includes('graphic-membership-card') || !card.includes('<svg')) {
+      throw new Error('renderMembershipCard failed to generate valid card markup');
+    }
+
+    // 2. Money Flow Diagram
+    const flow = compositor.renderMoneyFlowDiagram({ step1: 'Shoppers', step2: 'Annual Fee', step3: 'Profit' });
+    if (!flow.includes('Shoppers') || !flow.includes('Annual Fee') || !flow.includes('graphic-money-flow')) {
+      throw new Error('renderMoneyFlowDiagram failed to generate flow pipeline markup');
+    }
+
+    // 3. Profit Margins Bar Comparison
+    const margins = compositor.renderProfitMarginComparison({ retailMargin: '1.2%', memberMargin: '90%+' });
+    if (!margins.includes('1.2%') || !margins.includes('90%+') || !margins.includes('graphic-profit-margins')) {
+      throw new Error('renderProfitMarginComparison failed to generate margin chart');
+    }
+
+    // 4. Truth Anchor Hero Metric
+    const hero = compositor.renderTruthAnchorMetricHero({ metric: '$4.6 BILLION', label: 'ANNUAL NET PROFIT' });
+    if (!hero.includes('$4.6 BILLION') || !hero.includes('VERIFIED DATA') || !hero.includes('graphic-truth-metric')) {
+      throw new Error('renderTruthAnchorMetricHero failed to generate verified metric hero');
+    }
+
+    // 5. Market Growth Trendline
+    const trend = compositor.renderMarketGrowthTrendline({ title: 'RENEWAL RATE', value: '93%' });
+    if (!trend.includes('RENEWAL RATE') || !trend.includes('93%') || !trend.includes('graphic-trendline')) {
+      throw new Error('renderMarketGrowthTrendline failed to generate growth trendline');
+    }
+  }
+
+  async testShortsSceneDirector() {
+    const { ShortsSceneDirector } = require('./utils/shorts-scene-director');
+    const director = new ShortsSceneDirector();
+
+    const sampleScript = {
+      title: 'How Costco Makes Most of Its Profit From Membership Fees',
+      duration: 50,
+      hook: { text: 'Stop scrolling! Here is how Costco actually makes billions.' },
+      mainContent: {
+        sections: [
+          { title: 'The Grocery Myth', content: 'Most people think Costco makes money selling groceries and hot dogs.' },
+          { title: 'The Membership Secret', content: 'In reality, annual membership fees drive over 70% of total profits.' },
+          { title: 'The Unbeatable Margin', content: 'While groceries have a 1% margin, membership fees have a 90% profit margin.' }
+        ]
+      },
+      claims: [{ value: '$4.6 BILLION', verified: true }]
+    };
+
+    const scenes = director.directScript(sampleScript, { topic: sampleScript.title });
+
+    if (!Array.isArray(scenes) || scenes.length < 4) {
+      throw new Error(`ShortsSceneDirector did not generate sufficient scene beats (got ${scenes.length})`);
+    }
+
+    // Verify Hook Scene (Scene 0)
+    const hookScene = scenes[0];
+    if (hookScene.type !== 'hook' || hookScene.character.pose !== 'shocked') {
+      throw new Error('ShortsSceneDirector failed to direct Hook scene with shocked character');
+    }
+
+    // Verify Outro Scene (Last Scene)
+    const outroScene = scenes[scenes.length - 1];
+    if (outroScene.type !== 'outro' || !outroScene.headline.includes('MONEY IN MINUTES')) {
+      throw new Error('ShortsSceneDirector failed to direct signature Outro scene');
+    }
+
+    // Verify Duration Distribution
+    const totalAllocated = scenes.reduce((sum, s) => sum + s.duration, 0);
+    if (Math.abs(totalAllocated - 50) > 5) {
+      throw new Error(`Scene durations do not sum to target script duration: ${totalAllocated}`);
+    }
+  }
+
+  async testLipSyncEngine() {
+    const { LipSyncEngine, VISEMES } = require('./utils/lip-sync-engine');
+    const engine = new LipSyncEngine();
+
+    // 1. Word classification
+    const visemes = engine.classifyWordVisemes('Costco');
+    if (!Array.isArray(visemes) || visemes.length === 0) {
+      throw new Error('LipSyncEngine failed to classify word visemes');
+    }
+
+    // 2. Keyframe generation
+    const wordTimings = [
+      { word: 'Why', start: 0.1, end: 0.4 },
+      { word: 'Costco', start: 0.5, end: 0.9 },
+      { word: 'Makes', start: 1.0, end: 1.3 },
+      { word: 'Profit', start: 1.4, end: 1.8 }
+    ];
+    const keyframes = engine.generateKeyframes(wordTimings, 2.0, 15);
+    if (!Array.isArray(keyframes) || keyframes.length === 0) {
+      throw new Error('LipSyncEngine failed to generate viseme keyframes');
+    }
+    const speakingFrame = keyframes.find(k => k.isSpeaking);
+    if (!speakingFrame) {
+      throw new Error('LipSyncEngine did not identify speaking keyframes');
+    }
+
+    // 3. SVG Viseme mouth rendering
+    const svgMouth = engine.renderVisemeMouthSVG(VISEMES.OPEN_WIDE, 0.8, 'surprised');
+    if (!svgMouth.includes('viseme-mouth')) {
+      throw new Error('LipSyncEngine failed to render viseme mouth SVG');
+    }
+  }
+
+  async testEnvironmentEngine() {
+    const { EnvironmentEngine, ENVIRONMENTS } = require('./utils/environment-engine');
+    const engine = new EnvironmentEngine();
+
+    // 1. Classification
+    const warehouseEnv = engine.classifyEnvironment('How Costco Makes Most of Its Profit', 'warehouse aisles shopping cart');
+    if (warehouseEnv !== ENVIRONMENTS.RETAIL_WAREHOUSE) {
+      throw new Error(`EnvironmentEngine failed to classify warehouse environment (got ${warehouseEnv})`);
+    }
+
+    const techEnv = engine.classifyEnvironment('Nvidia 3 Trillion AI Boom', 'servers chips algorithms');
+    if (techEnv !== ENVIRONMENTS.TECH_HQ) {
+      throw new Error(`EnvironmentEngine failed to classify tech HQ environment (got ${techEnv})`);
+    }
+
+    // 2. SVG Environment rendering
+    const warehouseSVG = engine.renderEnvironmentSVG(ENVIRONMENTS.RETAIL_WAREHOUSE, { sceneIndex: 1, hasCart: true });
+    if (!warehouseSVG.includes('env-warehouse') || !warehouseSVG.includes('shopping-cart')) {
+      throw new Error('EnvironmentEngine failed to render warehouse SVG with shopping cart prop');
+    }
+  }
+
+  async testVisualQualityChecker() {
+    const { VisualQualityChecker } = require('./utils/visual-quality-checker');
+    const { ShortsSceneDirector } = require('./utils/shorts-scene-director');
+    const checker = new VisualQualityChecker();
+    const director = new ShortsSceneDirector();
+
+    const sampleScript = {
+      title: 'How Costco Makes Profit',
+      duration: 48,
+      mainContent: {
+        sections: [
+          { title: 'Myth', content: 'People think groceries are the key.' },
+          { title: 'Truth', content: 'Membership fees generate $4.6 Billion in profit.' }
+        ]
+      }
+    };
+
+    const scenes = director.directScript(sampleScript);
+
+    // 1. Valid vertical 1080x1920 Short
+    const validResult = checker.evaluate({
+      scenes,
+      script: sampleScript,
+      duration: 48,
+      canvas: { width: 1080, height: 1920, aspectRatio: '9:16' }
+    });
+
+    if (!validResult.passed || validResult.score < 80) {
+      throw new Error(`Visual quality check failed for valid Short: ${validResult.summary}`);
+    }
+
+    // 2. Invalid dimensions (e.g., horizontal 1920x1080 passed as Short)
+    const invalidResult = checker.evaluate({
+      scenes,
+      script: sampleScript,
+      duration: 48,
+      canvas: { width: 1920, height: 1080, aspectRatio: '16:9' }
+    });
+
+    if (invalidResult.passed || !invalidResult.blockingFailures.includes('canvas_resolution')) {
+      throw new Error('Visual quality check failed to flag invalid horizontal dimensions');
+    }
+  }
+
+  async testVideoProviderRegistry() {
+    const { VideoProviderRegistry, PROVIDER_TIERS } = require('./utils/video-provider-registry');
+    const registry = new VideoProviderRegistry({ budgetCap: 0.00, allowPaidProviders: false });
+
+    // 1. Free-first selection
+    const selected = registry.selectProvider({ requiredFeatures: ['character_animation'] });
+    if (!selected || selected.tier !== PROVIDER_TIERS.FREE) {
+      throw new Error('VideoProviderRegistry failed to default to FREE tier provider');
+    }
+
+    // 2. Paid provider blocked when budget is $0
+    const paidProvider = registry.getProvider('replicate_video');
+    if (paidProvider && paidProvider.isAvailable()) {
+      throw new Error('VideoProviderRegistry allowed paid provider without authorization');
+    }
+
+    // 3. Itemized cost receipt generation
+    const sampleScenes = [
+      { sceneId: 'scene_01', duration: 4.0 },
+      { sceneId: 'scene_02', duration: 4.5 }
+    ];
+    const receipt = registry.generateCostReceipt(sampleScenes, { productionId: 'prod_cost_test' });
+    if (receipt.totalEstimatedCostUSD !== 0.00 || receipt.tier !== PROVIDER_TIERS.FREE || receipt.sceneCount !== 2) {
+      throw new Error('generateCostReceipt produced invalid cost calculations');
+    }
+  }
+
+  async testFrameSamplingVisualQA() {
+    const { VisualQualityChecker } = require('./utils/visual-quality-checker');
+    const checker = new VisualQualityChecker();
+
+    // 1. Missing file check
+    const missingResult = await checker.inspectRenderedVideoFile('non_existent_video.mp4');
+    if (missingResult.passed) {
+      throw new Error('inspectRenderedVideoFile failed to flag missing video file');
+    }
   }
 }
 

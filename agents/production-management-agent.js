@@ -48,11 +48,49 @@ class ProductionManagementAgent {
     }
   }
 
+  isShortProduction(productionData = {}) {
+    const strategy = productionData.strategy || {};
+    const script = productionData.script || {};
+    const options = productionData.options || {};
+    return Boolean(
+      productionData.isShort === true ||
+      productionData.isShorts === true ||
+      productionData.contentType === 'short' ||
+      productionData.contentType === 'shorts' ||
+      productionData.format === 'short' ||
+      productionData.format === 'shorts' ||
+      productionData.aspectRatio === '9:16' ||
+      strategy.isShort === true ||
+      strategy.isShorts === true ||
+      strategy.contentType === 'short' ||
+      strategy.contentType === 'shorts' ||
+      strategy.format === 'short' ||
+      strategy.format === 'shorts' ||
+      strategy.aspectRatio === '9:16' ||
+      strategy.requestedLengthKey === 'short' ||
+      strategy.requestedLength === 'short' ||
+      script.isShort === true ||
+      script.isShorts === true ||
+      script.format === 'short' ||
+      script.format === 'shorts' ||
+      script.aspectRatio === '9:16' ||
+      options.isShort === true ||
+      options.isShorts === true ||
+      options.format === 'short' ||
+      options.format === 'shorts' ||
+      options.contentType === 'short' ||
+      options.contentType === 'shorts' ||
+      options.aspectRatio === '9:16' ||
+      options.requestedLengthKey === 'short'
+    );
+  }
+
   async processContent(contentData) {
     try {
       this.logger.info('Processing content for production...');
       
       const { strategy, script, thumbnail, seo, jobId = null } = contentData;
+      const isShort = this.isShortProduction(contentData);
       
       // Create production entry
       const productionId = this.generateProductionId();
@@ -64,6 +102,10 @@ class ProductionManagementAgent {
         thumbnail,
         seo,
         status: 'processing',
+        contentType: isShort ? 'short' : (contentData.contentType || strategy?.contentType || 'long_form'),
+        format: isShort ? 'short' : (contentData.format || strategy?.format || 'long_form'),
+        aspectRatio: isShort ? '9:16' : (contentData.aspectRatio || strategy?.aspectRatio || '16:9'),
+        isShort,
         assets: {
           script: await this.processScript(script),
           thumbnail: await this.processThumbnail(thumbnail, script),
@@ -109,14 +151,6 @@ class ProductionManagementAgent {
       await this.sceneRepair.initializeProduction(productionData, this.aiVideoGenerator.lastVideoResult || {});
 
       // Phase 2C: Record Content DNA profile for Shorts productions
-      const isShort = productionData.contentType === 'short' ||
-        strategy?.contentType === 'short' ||
-        strategy?.contentType === 'shorts' ||
-        strategy?.format === 'short' ||
-        strategy?.format === 'shorts' ||
-        productionData.aspectRatio === '9:16' ||
-        strategy?.aspectRatio === '9:16';
-
       if (isShort) {
         try {
           const existingDNA = await this.db.getContentDNA(productionId);
@@ -338,13 +372,7 @@ class ProductionManagementAgent {
         visualAssets.push(...assets);
       }
       
-      const isShort = productionData.contentType === 'short' ||
-        productionData.strategy?.contentType === 'short' ||
-        productionData.strategy?.contentType === 'shorts' ||
-        productionData.strategy?.format === 'short' ||
-        productionData.strategy?.format === 'shorts' ||
-        productionData.aspectRatio === '9:16' ||
-        productionData.strategy?.aspectRatio === '9:16';
+      const isShort = this.isShortProduction(productionData);
 
       productionData.assets.video = {
         visualAssets: visualAssets,
@@ -496,13 +524,7 @@ class ProductionManagementAgent {
   async generateCaptions(productionData) {
     this.logger.info('Generating captions...');
     
-    const isShort = productionData.contentType === 'short' ||
-      productionData.strategy?.contentType === 'short' ||
-      productionData.strategy?.contentType === 'shorts' ||
-      productionData.strategy?.format === 'short' ||
-      productionData.strategy?.format === 'shorts' ||
-      productionData.aspectRatio === '9:16' ||
-      productionData.strategy?.aspectRatio === '9:16';
+    const isShort = this.isShortProduction(productionData);
 
     const captionsDir = path.join(__dirname, '..', 'data', 'captions');
     await fs.mkdir(captionsDir, { recursive: true });
@@ -656,13 +678,7 @@ class ProductionManagementAgent {
         return await this.simulateVideoAssembly(productionData, 'Narration is missing');
       }
 
-      const isShort = productionData.contentType === 'short' ||
-        productionData.strategy?.contentType === 'short' ||
-        productionData.strategy?.contentType === 'shorts' ||
-        productionData.strategy?.format === 'short' ||
-        productionData.strategy?.format === 'shorts' ||
-        productionData.aspectRatio === '9:16' ||
-        productionData.strategy?.aspectRatio === '9:16';
+      const isShort = this.isShortProduction(productionData);
 
       // Use AI Video Generator to create the final video
       const producedPath = await this.aiVideoGenerator.generateVideo(
@@ -676,6 +692,8 @@ class ProductionManagementAgent {
           estimatedDuration: productionData.estimatedDuration,
           aspectRatio: isShort ? '9:16' : '16:9',
           isShort,
+          topic: productionData.strategy?.topic || productionData.script?.title,
+          claims: productionData.provenance?.claims || productionData.script?.claims || [],
           hook: productionData.strategy?.hook || productionData.hook,
           hookDuration: productionData.strategy?.hookDuration || productionData.hookDuration
         }
