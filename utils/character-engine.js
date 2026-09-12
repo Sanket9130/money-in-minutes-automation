@@ -11,6 +11,8 @@
 
 const { Logger } = require('./logger');
 const { LipSyncEngine, VISEMES } = require('./lip-sync-engine');
+const { CharacterDNAService } = require('./character-dna-service');
+const { CharacterSelector } = require('./character-selector');
 
 const CHARACTER_PROFILE = {
   id: 'money-in-minutes-presenter',
@@ -64,6 +66,8 @@ class CharacterEngine {
     this.profile = CHARACTER_PROFILE;
     this.options = options;
     this.lipSync = new LipSyncEngine();
+    this.dnaService = options.dnaService || new CharacterDNAService(options);
+    this.selector = options.selector || new CharacterSelector({ dnaService: this.dnaService, ...options });
   }
 
   static get PROFILE() {
@@ -72,6 +76,20 @@ class CharacterEngine {
 
   static get POSES() {
     return ALLOWED_POSES;
+  }
+
+  /**
+   * Intelligently selects or creates the optimal presenter for a context.
+   */
+  selectPresenter(context = {}) {
+    return this.selector.selectPresenter(context);
+  }
+
+  /**
+   * Alias for selectPresenter for consistency.
+   */
+  selectCharacter(context = {}) {
+    return this.selector.selectPresenter(context);
   }
 
   /**
@@ -88,6 +106,17 @@ class CharacterEngine {
    * Generates a descriptive AI prompt for image generators while enforcing strict character consistency.
    */
   generateAIPrompt(pose = 'explaining', context = {}) {
+    if (context.character_id || (context.useMultiCharacter && context.topic)) {
+      const selected = context.character_id
+        ? { character: this.dnaService.getCharacter(context.character_id) }
+        : this.selectPresenter(context);
+      
+      if (selected?.character) {
+        const promptBundle = this.dnaService.buildPresenterPrompt(selected.character.character_id, pose, context.emotion || 'confident', context);
+        return promptBundle.prompt;
+      }
+    }
+
     const normPose = this.normalizePose(pose);
     const topic = context.topic || 'finance and business';
     const env = context.environment || 'modern finance studio';

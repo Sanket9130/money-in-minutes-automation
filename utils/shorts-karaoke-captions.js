@@ -22,8 +22,34 @@ class ShortsKaraokeCaptions {
    * @param {object} options - Options including optional provider word timings
    * @returns {Array<{ word: string, start: number, end: number, cleanWord: string }>}
    */
+  /**
+   * Helper to parse any numeric or MM:SS formatted duration string into seconds
+   */
+  static parseDurationSeconds(duration) {
+    if (typeof duration === 'number') return isNaN(duration) ? 0 : duration;
+    if (typeof duration !== 'string') return 0;
+    const str = duration.trim();
+    if (/^\d+(\.\d+)?$/.test(str)) return parseFloat(str);
+    const parts = str.split(':').map(Number);
+    if (parts.some(isNaN)) return 0;
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    return 0;
+  }
+
+  /**
+   * Generates word-level timestamps for a text script.
+   * Uses provider-supplied timings if provided, or calculates natural-speech
+   * weighted durations matching the total audio duration.
+   *
+   * @param {string} text - Spoken narration text
+   * @param {number|string} totalDuration - Total audio duration in seconds (or MM:SS)
+   * @param {object} options - Options including optional provider word timings
+   * @returns {Array<{ word: string, start: number, end: number, cleanWord: string }>}
+   */
   static buildWordTimings(text = '', totalDuration = 0, options = {}) {
-    const duration = Math.max(0.1, Number(totalDuration) || 0);
+    const parsedDuration = this.parseDurationSeconds(totalDuration);
+    const duration = Math.max(0.1, parsedDuration || 0);
 
     // If provider supplied explicit word timings (e.g. from ElevenLabs or Azure), validate and use them
     if (Array.isArray(options.providerTimings) && options.providerTimings.length > 0) {
@@ -216,11 +242,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
         // Reconstruct phrase text with the active word styled in highlight color
         const lineParts = words.map((w, idx) => {
+          const safeWord = this.sanitizeASSWord(w.word);
           if (idx === wIndex) {
             // Highlight active word in vibrant color with subtle bold pop
-            return `{\\c${highlightColor}\\b1}${w.word}{\\rKaraokeShorts}`;
+            return `{\\c${highlightColor}\\b1}${safeWord}{\\rKaraokeShorts}`;
           }
-          return `{\\c${inactiveColor}}${w.word}`;
+          return `{\\c${inactiveColor}}${safeWord}`;
         });
 
         const lineText = lineParts.join(' ');
@@ -303,8 +330,25 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
   /**
    * Extracts clean spoken text from a script object across sections.
+   * Prioritizes direct narration strings if present as source of truth.
    */
   static extractTextFromScript(script = {}) {
+    if (typeof script === 'string') {
+      return script.trim();
+    }
+    if (typeof script.narrationText === 'string' && script.narrationText.trim()) {
+      return script.narrationText.trim();
+    }
+    if (typeof script.narration === 'string' && script.narration.trim()) {
+      return script.narration.trim();
+    }
+    if (typeof script.fullNarration === 'string' && script.fullNarration.trim()) {
+      return script.fullNarration.trim();
+    }
+    if (typeof script.spokenText === 'string' && script.spokenText.trim()) {
+      return script.spokenText.trim();
+    }
+
     const parts = [];
 
     if (script.hook?.text) {
@@ -345,6 +389,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   }
 
   /**
+   * Sanitizes a word for ASS format to prevent control character corruption.
+   */
+  static sanitizeASSWord(word = '') {
+    return String(word || '')
+      .replace(/\\/g, '/')
+      .replace(/\{/g, '(')
+      .replace(/\}/g, ')');
+  }
+
+  /**
    * Burns an ASS subtitle file directly onto a video using FFmpeg.
    * Correctly escapes Windows paths for the subtitles filter.
    */
@@ -367,6 +421,50 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   }
 
   /**
+   * Verifies that caption words strictly equal the narration text words with 0 hallucinations or omissions.
+   *
+   * @param {string} narrationText
+   * @param {Array<{word: string, start: number, end: number}>} wordTimings
+   * @returns {{ valid: boolean, errors: string[], wordCount: number }}
+   */
+  static verifyNarrationMatchesCaptions(narrationText = '', wordTimings = []) {
+    const rawTokens = String(narrationText || '').trim().split(/\s+/).filter(Boolean);
+    const errors = [];
+
+    if (rawTokens.length !== wordTimings.length) {
+      errors.push(`Word count mismatch: narration has ${rawTokens.length} words, captions have ${wordTimings.length} words`);
+    }
+
+    const checkCount = Math.min(rawTokens.length, wordTimings.length);
+    for (let i = 0; i < checkCount; i++) {
+      const token = rawTokens[i];
+      const captionWord = wordTimings[i].word;
+      if (token !== captionWord) {
+        errors.push(`Word mismatch at index ${i}: expected "${token}", found "${captionWord}"`);
+      }
+    }
+
+    // Monotonic timing check
+    let lastEnd = 0;
+    for (let i = 0; i < wordTimings.length; i++) {
+      const wt = wordTimings[i];
+      if (wt.start < lastEnd - 0.05) {
+        errors.push(`Timing non-monotonic at word ${i} ("${wt.word}"): start ${wt.start} < prev end ${lastEnd}`);
+      }
+      if (wt.end <= wt.start) {
+        errors.push(`Zero/negative duration at word ${i} ("${wt.word}"): start ${wt.start}, end ${wt.end}`);
+      }
+      lastEnd = wt.end;
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors,
+      wordCount: rawTokens.length
+    };
+  }
+
+  /**
    * Complete pipeline: given narration audio and script/text, produces
    * both .ass and .srt caption files and optionally burns them onto the video.
    */
@@ -376,6 +474,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     const spokenText = text || this.extractTextFromScript(script);
     const wordTimings = this.buildWordTimings(spokenText, audioDuration, options);
     const phrases = this.chunkIntoPhrases(wordTimings, options);
+
+    const verification = this.verifyNarrationMatchesCaptions(spokenText, wordTimings);
+    if (!verification.valid && options.strictVerification) {
+      throw new Error(`Caption verification failed: ${verification.errors.join('; ')}`);
+    }
 
     const assContent = this.generateASS(phrases, options);
     const srtContent = this.generateSRT(phrases);
@@ -392,7 +495,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       wordTimings,
       phrases,
       wordCount: wordTimings.length,
-      phraseCount: phrases.length
+      phraseCount: phrases.length,
+      verification
     };
   }
 }

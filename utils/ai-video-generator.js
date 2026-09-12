@@ -11,6 +11,8 @@ const { ShortsCanvasCompositor, CANVAS_PRESETS } = require('./shorts-canvas-comp
 const { ShortsKaraokeCaptions } = require('./shorts-karaoke-captions');
 const { ShortsVisualHook } = require('./shorts-visual-hook');
 const { VideoProviderRegistry, PROVIDER_TIERS } = require('./video-provider-registry');
+const { LivePortraitProvider } = require('./liveportrait-provider');
+const { FreeBrollProvider } = require('./free-broll-provider');
 
 class AIVideoGenerator {
   constructor(credentials, options = {}) {
@@ -19,6 +21,8 @@ class AIVideoGenerator {
     this.db = options.db || null;
     this.options = options;
     this.providerRegistry = new VideoProviderRegistry(options);
+    this.livePortrait = new LivePortraitProvider(options);
+    this.freeBroll = new FreeBrollProvider(options);
     this.lastVideoResult = null;
     this.lastNarrationResult = null;
     this.lastWordTimings = null;
@@ -71,11 +75,12 @@ class AIVideoGenerator {
   async generateTTSAudio(text, outputPath) {
     this.logger.info('Generating TTS audio...');
     this.lastNarrationResult = null;
+    this.lastNarrationText = text;
     let provider = 'simulation';
-    let model = null;
+    let model = 'placeholder';
+    let generatedPath = null;
 
     try {
-      let generatedPath;
       if (this.elevenLabsApiKey && this.elevenLabsVoiceId) {
         provider = 'elevenlabs';
         model = this.elevenLabsModel;
@@ -476,12 +481,14 @@ class AIVideoGenerator {
         options.scenes || [],
         { productionId: resolvedOptions.productionId, provider: 'local_canvas' }
       );
+      const isLpActive = this.lastLivePortraitResult?.success && !this.lastLivePortraitResult.isFallback;
       this.lastVideoResult = {
         requestedProvider: 'local_canvas',
-        actualProvider: 'local_canvas',
-        model: 'local-canvas-ffmpeg',
+        actualProvider: isLpActive ? 'liveportrait_gpu_canvas' : 'local_canvas',
+        model: isLpActive ? 'liveportrait-rtx3050-cuda' : 'local-canvas-ffmpeg',
         mode: 'slideshow',
         generatedSeconds: this.calculateScriptDuration(script),
+        livePortraitResult: this.lastLivePortraitResult || null,
         costReceipt: receipt,
         tasks: [],
         scenes: []
@@ -671,6 +678,25 @@ class AIVideoGenerator {
         this.lastHookResult = null;
       }
 
+      // Execute local GPU LivePortrait generation for presenter scenes in Shorts
+      if (isShorts && options.presenter !== false) {
+        try {
+          const presenterOutputDir = path.join(path.dirname(outputPath), 'presenter');
+          await fs.mkdir(presenterOutputDir, { recursive: true });
+          const presenterClipPath = path.join(presenterOutputDir, `${path.basename(outputPath, '.mp4')}_presenter.mp4`);
+          const lpResult = await this.livePortrait.generatePresenter({
+            audioPath,
+            duration,
+            outputPath: presenterClipPath,
+            expression: 'explaining'
+          });
+          this.lastLivePortraitResult = lpResult;
+        } catch (lpErr) {
+          this.logger.warn(`LivePortrait presenter generation error: ${lpErr.message}`);
+          this.lastLivePortraitResult = { success: false, isFallback: true, reason: lpErr.message };
+        }
+      }
+
       await this.renderSlidesToVideo(stills, duration, videoPath, {
         ...options,
         canvas,
@@ -686,9 +712,11 @@ class AIVideoGenerator {
         const baseName = path.basename(outputPath, '.mp4');
         const measuredDuration = await this.getAudioDuration(audioPath);
         const effectiveDuration = measuredDuration > 0 ? measuredDuration : duration;
+        const narrationText = options.narrationText || script?.narrationText || script?.narration || this.lastNarrationText;
 
         const captionResult = await ShortsKaraokeCaptions.processCaptions({
           script,
+          text: narrationText,
           audioDuration: effectiveDuration,
           outputDir: captionsDir,
           baseName,

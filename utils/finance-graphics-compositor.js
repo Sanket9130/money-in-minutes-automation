@@ -312,6 +312,82 @@ class FinanceGraphicsCompositor {
       </div>
     `;
   }
+
+  /**
+   * Renders a vertical 4-step compounding process flywheel diagram.
+   */
+  renderProcessFlywheel(options = {}) {
+    const width = options.width || 720;
+    const height = options.height || 620;
+    const steps = options.steps || [
+      { text: 'Membership Fees', icon: '💳', subtext: '100% Upfront Cash' },
+      { text: 'Lower Bulk Prices', icon: '🏷️', subtext: 'Strict 14% Markup Cap' },
+      { text: 'More Loyal Customers', icon: '🛒', subtext: '130M+ Cardholders' },
+      { text: 'Compounding Profits', icon: '🚀', subtext: '$4.6B Operating Income' }
+    ];
+
+    return `
+      <div class="finance-graphic graphic-process-flywheel">
+        <svg viewBox="0 0 720 620" width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="flywheelFrame" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#0F172A"/>
+              <stop offset="100%" stop-color="#1E293B"/>
+            </linearGradient>
+            <filter id="boxGlow" x="-20%" y="-20%" width="140%" height="140%">
+              <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.5"/>
+            </filter>
+          </defs>
+
+          <!-- Backplate -->
+          <rect x="10" y="10" width="700" height="600" rx="28" fill="url(#flywheelFrame)" stroke="#38BDF8" stroke-width="2.5"/>
+
+          <text x="360" y="55" font-family="-apple-system, sans-serif" font-size="22" font-weight="900" fill="#38BDF8" text-anchor="middle" letter-spacing="2">🔄 THE COMPOUNDING SUBSCRIPTION FLYWHEEL</text>
+
+          <!-- Step 1 -->
+          <g transform="translate(110, 80)" filter="url(#boxGlow)">
+            <rect x="0" y="0" width="500" height="90" rx="20" fill="#1E293B" stroke="#F59E0B" stroke-width="3"/>
+            <text x="35" y="55" font-size="34">💳</text>
+            <text x="90" y="45" font-family="-apple-system, sans-serif" font-size="22" font-weight="900" fill="#FCD34D">${escapeHTML(steps[0].text)}</text>
+            <text x="90" y="70" font-family="-apple-system, sans-serif" font-size="14" font-weight="600" fill="#94A3B8">${escapeHTML(steps[0].subtext)}</text>
+          </g>
+
+          <!-- Down Arrow 1 -->
+          <path d="M360,175 L360,205 M350,195 L360,205 L370,195" stroke="#F59E0B" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+
+          <!-- Step 2 -->
+          <g transform="translate(110, 215)" filter="url(#boxGlow)">
+            <rect x="0" y="0" width="500" height="90" rx="20" fill="#1E293B" stroke="#3B82F6" stroke-width="3"/>
+            <text x="35" y="55" font-size="34">🏷️</text>
+            <text x="90" y="45" font-family="-apple-system, sans-serif" font-size="22" font-weight="900" fill="#60A5FA">${escapeHTML(steps[1].text)}</text>
+            <text x="90" y="70" font-family="-apple-system, sans-serif" font-size="14" font-weight="600" fill="#94A3B8">${escapeHTML(steps[1].subtext)}</text>
+          </g>
+
+          <!-- Down Arrow 2 -->
+          <path d="M360,310 L360,340 M350,330 L360,340 L370,330" stroke="#3B82F6" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+
+          <!-- Step 3 -->
+          <g transform="translate(110, 350)" filter="url(#boxGlow)">
+            <rect x="0" y="0" width="500" height="90" rx="20" fill="#1E293B" stroke="#A855F7" stroke-width="3"/>
+            <text x="35" y="55" font-size="34">🛒</text>
+            <text x="90" y="45" font-family="-apple-system, sans-serif" font-size="22" font-weight="900" fill="#C084FC">${escapeHTML(steps[2].text)}</text>
+            <text x="90" y="70" font-family="-apple-system, sans-serif" font-size="14" font-weight="600" fill="#94A3B8">${escapeHTML(steps[2].subtext)}</text>
+          </g>
+
+          <!-- Down Arrow 3 -->
+          <path d="M360,445 L360,475 M350,465 L360,475 L370,465" stroke="#10B981" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+
+          <!-- Step 4 -->
+          <g transform="translate(110, 485)" filter="url(#boxGlow)">
+            <rect x="0" y="0" width="500" height="95" rx="20" fill="#064E3B" stroke="#10B981" stroke-width="3.5"/>
+            <text x="35" y="58" font-size="36">🚀</text>
+            <text x="90" y="48" font-family="-apple-system, sans-serif" font-size="24" font-weight="900" fill="#34D399">${escapeHTML(steps[3].text)}</text>
+            <text x="90" y="74" font-family="-apple-system, sans-serif" font-size="14" font-weight="700" fill="#A7F3D0">${escapeHTML(steps[3].subtext)}</text>
+          </g>
+        </svg>
+      </div>
+    `;
+  }
 }
 
 function escapeHTML(str = '') {

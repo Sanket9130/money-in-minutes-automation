@@ -4,6 +4,11 @@ module.exports = [
   {
     ignores: [
       'node_modules/**',
+      '.venv-liveportrait/**',
+      '.venv-synctalk/**',
+      'third_party/**',
+      'scratch/**',
+      'models/**',
       'coverage/**',
       'logs/**',
       'temp/**',

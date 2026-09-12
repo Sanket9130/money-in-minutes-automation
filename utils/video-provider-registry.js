@@ -7,16 +7,187 @@
  * - Scored provider selector with automatic tiered fallback
  * - Free-First Cost Governance ($0.00 default production path)
  * - Itemized per-scene and total video cost ledger (FREE, FREE-TIER, PAID)
- * - Pluggable cloud providers (Replicate / Kling / Runway / Veo) disabled by default
+ * - Pluggable cloud adapters (Pexels/Pixabay, Kling, Runway, Veo, MiniMax, WAN/CogVideo)
+ * - Strict disabled-by-default paid policy with budget enforcement
  */
 
 const { Logger } = require('./logger');
 
 const PROVIDER_TIERS = {
-  FREE: 'FREE',             // 100% Local / Programmatic ($0.00)
+  FREE: 'FREE',             // 100% Local / Programmatic / Open Stock ($0.00)
   FREE_TIER: 'FREE-TIER',   // Free-tier cloud API with quota limits ($0.00)
   PAID: 'PAID'              // Paid API requiring explicit budget approval
 };
+
+/**
+ * Base Provider Adapter Contract
+ */
+class BaseVideoProviderAdapter {
+  constructor(id, name, tier, options = {}) {
+    this.id = id;
+    this.name = name;
+    this.tier = tier;
+    this.costPerSec = Number(options.costPerSec || 0.0);
+    this.priority = Number(options.priority || 50);
+    this.features = options.features || [];
+    this.options = options;
+  }
+
+  isAvailable() {
+    return true;
+  }
+
+  async generateClip(_scenePlan, _options = {}) {
+    throw new Error(`generateClip not implemented on ${this.name}`);
+  }
+}
+
+class LocalCanvasProviderAdapter extends BaseVideoProviderAdapter {
+  constructor(options = {}) {
+    super('local_canvas', 'Local HD Canvas & Motion Engine', PROVIDER_TIERS.FREE, {
+      costPerSec: 0.0,
+      priority: 100,
+      features: ['character_animation', 'environments', 'finance_graphics', 'captions', 'safe_zones'],
+      ...options
+    });
+  }
+
+  isAvailable() {
+    return true;
+  }
+}
+
+class FreeStockVideoProviderAdapter extends BaseVideoProviderAdapter {
+  constructor(options = {}) {
+    super('free_stock_video', 'Pexels & Pixabay Stock Footage Engine', PROVIDER_TIERS.FREE, {
+      costPerSec: 0.0,
+      priority: 90,
+      features: ['real_motion_footage', 'b_roll', 'environment_video'],
+      ...options
+    });
+  }
+
+  isAvailable() {
+    return Boolean(process.env.PEXELS_API_KEY || process.env.PIXABAY_API_KEY);
+  }
+}
+
+class LivePortraitProviderAdapter extends BaseVideoProviderAdapter {
+  constructor(options = {}) {
+    super('liveportrait_local', 'Local LivePortrait Presenter Engine', PROVIDER_TIERS.FREE, {
+      costPerSec: 0.0,
+      priority: 95,
+      features: ['character_animation', 'lip_sync', 'facial_expressions', 'talking_head', 'offline'],
+      ...options
+    });
+    const { LivePortraitProvider } = require('./liveportrait-provider');
+    this.engine = new LivePortraitProvider(options);
+  }
+
+  isAvailable() {
+    return true; // Exposes graceful fallback to SVG/Canvas presenter if dependencies are not loaded
+  }
+
+  async checkLivePortraitCapability() {
+    return this.engine.checkAvailability();
+  }
+}
+
+class LocalGPUVideoProviderAdapter extends BaseVideoProviderAdapter {
+  constructor(options = {}) {
+    super('local_gpu_video', 'Local Diffusion Engine (WAN 2.1 / CogVideo / LTX)', PROVIDER_TIERS.FREE, {
+      costPerSec: 0.0,
+      priority: 85,
+      features: ['ai_video_diffusion', 'image_to_video', 'offline'],
+      ...options
+    });
+  }
+
+  isAvailable() {
+    return process.env.VIDEO_GEN_LOCAL_ENABLED === 'true' || process.env.LOCAL_GPU_ENABLED === 'true';
+  }
+}
+
+class GeminiMediaProviderAdapter extends BaseVideoProviderAdapter {
+  constructor(options = {}) {
+    super('gemini_media', 'Gemini Media Service', PROVIDER_TIERS.FREE_TIER, {
+      costPerSec: 0.0,
+      priority: 80,
+      features: ['script_generation', 'tts_audio', 'image_assets'],
+      ...options
+    });
+  }
+
+  isAvailable() {
+    return Boolean(process.env.GEMINI_API_KEY);
+  }
+}
+
+class KlingProviderAdapter extends BaseVideoProviderAdapter {
+  constructor(options = {}) {
+    super('kling_video', 'Kling AI Official Video Engine', PROVIDER_TIERS.PAID, {
+      costPerSec: 0.05,
+      priority: 45,
+      features: ['ai_video_diffusion', 'cinematic_motion', 'character_consistency', 'lip_sync'],
+      ...options
+    });
+  }
+
+  isAvailable() {
+    return Boolean(process.env.KLING_API_KEY);
+  }
+}
+
+class RunwayProviderAdapter extends BaseVideoProviderAdapter {
+  constructor(options = {}) {
+    super('runway_video', 'Runway Gen-3 / Gen-4 Alpha Engine', PROVIDER_TIERS.PAID, {
+      costPerSec: 0.08,
+      priority: 40,
+      features: ['ai_video_diffusion', 'camera_director', 'cinematic_motion'],
+      ...options
+    });
+  }
+
+  isAvailable() {
+    return Boolean(process.env.RUNWAY_API_KEY);
+  }
+}
+
+class VeoProviderAdapter extends BaseVideoProviderAdapter {
+  constructor(options = {}) {
+    super('veo_video', 'Google DeepMind Veo Video Engine', PROVIDER_TIERS.PAID, {
+      costPerSec: 0.10,
+      priority: 85,
+      features: ['ai_video_diffusion', 'image_to_video', '9:16_native', 'character_conditioning', '1080p'],
+      ...options
+    });
+    const { GoogleVeoProvider } = require('./google-veo-provider');
+    this.provider = new GoogleVeoProvider(options);
+  }
+
+  isAvailable() {
+    return this.provider ? this.provider.isAvailable() : false;
+  }
+
+  async generateClip(scenePlan, options = {}) {
+    return this.provider.generateClip(scenePlan, options);
+  }
+}
+
+class MinimaxProviderAdapter extends BaseVideoProviderAdapter {
+  constructor(options = {}) {
+    super('minimax_video', 'MiniMax Hailuo H3 Video Engine', PROVIDER_TIERS.PAID, {
+      costPerSec: 0.05,
+      priority: 30,
+      features: ['ai_video_diffusion', 'cinematic_motion'],
+      ...options
+    });
+  }
+
+  isAvailable() {
+    return Boolean(process.env.MINIMAX_API_KEY);
+  }
+}
 
 class VideoProviderRegistry {
   constructor(options = {}) {
@@ -29,18 +200,33 @@ class VideoProviderRegistry {
   }
 
   registerDefaultProviders() {
-    // 1. Primary: Local Programmatic Canvas & WebGL Engine (Free, Offline, 0 latency)
-    this.register('local_canvas', {
-      name: 'Local HD Canvas & Motion Engine',
-      tier: PROVIDER_TIERS.FREE,
-      costPerSec: 0.00,
-      priority: 100,
-      isAvailable: () => true,
-      features: ['character_animation', 'environments', 'finance_graphics', 'captions', 'safe_zones']
+    const { GoogleVeoProvider } = require('./google-veo-provider');
+    const veoInstance = new GoogleVeoProvider(this.options);
+
+    this.register('local_canvas', new LocalCanvasProviderAdapter());
+    this.register('liveportrait_local', new LivePortraitProviderAdapter());
+    this.register('free_stock_video', new FreeStockVideoProviderAdapter());
+    this.register('local_gpu_video', new LocalGPUVideoProviderAdapter());
+    this.register('gemini_media', new GeminiMediaProviderAdapter());
+    this.register('google_veo_3', veoInstance);
+    this.register('veo_video', new VeoProviderAdapter(this.options));
+    this.register('kling_video', new KlingProviderAdapter());
+    this.register('runway_video', new RunwayProviderAdapter());
+    this.register('minimax_video', new MinimaxProviderAdapter());
+
+    // Legacy / simulation aliases
+    this.register('replicate_video', {
+      id: 'replicate_video',
+      name: 'Replicate Video Engine (Wan / Kling / LivePortrait)',
+      tier: PROVIDER_TIERS.PAID,
+      costPerSec: 0.04,
+      priority: 50,
+      isAvailable: () => this.allowPaidProviders && Boolean(process.env.REPLICATE_API_TOKEN || process.env.REPLICATE_API_KEY),
+      features: ['ai_video_diffusion', 'talking_head']
     });
 
-    // 2. Offline Speech Synthesizer (Windows SAPI / FFmpeg tone stream)
     this.register('offline_speech', {
+      id: 'offline_speech',
       name: 'Offline Speech Synthesizer',
       tier: PROVIDER_TIERS.FREE,
       costPerSec: 0.00,
@@ -48,48 +234,10 @@ class VideoProviderRegistry {
       isAvailable: () => true,
       features: ['voice_narration', 'viseme_timing']
     });
-
-    // 3. Free-Tier Cloud (Gemini Media & TTS)
-    this.register('gemini_media', {
-      name: 'Gemini Media Service',
-      tier: PROVIDER_TIERS.FREE_TIER,
-      costPerSec: 0.00,
-      priority: 80,
-      isAvailable: () => Boolean(process.env.GEMINI_API_KEY),
-      features: ['script_generation', 'tts_audio', 'image_assets']
-    });
-
-    // 4. Pluggable Cloud AI Providers (Disabled unless explicitly configured and budgeted)
-    this.register('replicate_video', {
-      name: 'Replicate Video Engine (Wan / Kling / LivePortrait)',
-      tier: PROVIDER_TIERS.PAID,
-      costPerSec: 0.04, // ~$0.20 per 5s clip
-      priority: 50,
-      isAvailable: () => this.allowPaidProviders && Boolean(process.env.REPLICATE_API_TOKEN || process.env.REPLICATE_API_KEY),
-      features: ['ai_video_diffusion', 'talking_head']
-    });
-
-    this.register('kling_video', {
-      name: 'Kling Video Provider',
-      tier: PROVIDER_TIERS.PAID,
-      costPerSec: 0.05,
-      priority: 45,
-      isAvailable: () => this.allowPaidProviders && Boolean(process.env.KLING_API_KEY),
-      features: ['ai_video_diffusion', 'cinematic_motion']
-    });
-
-    this.register('runway_video', {
-      name: 'Runway Gen-3 Provider',
-      tier: PROVIDER_TIERS.PAID,
-      costPerSec: 0.08,
-      priority: 40,
-      isAvailable: () => this.allowPaidProviders && Boolean(process.env.RUNWAY_API_KEY),
-      features: ['ai_video_diffusion', 'camera_director']
-    });
   }
 
   register(id, providerDef) {
-    this.providers.set(id, { id, ...providerDef });
+    this.providers.set(id, providerDef);
   }
 
   getProvider(id) {
@@ -104,7 +252,7 @@ class VideoProviderRegistry {
    */
   selectProvider(requirement = {}) {
     const available = Array.from(this.providers.values())
-      .filter(p => p.isAvailable())
+      .filter(p => (typeof p.isAvailable === 'function' ? p.isAvailable() : true))
       .filter(p => {
         if (p.tier === PROVIDER_TIERS.PAID && (!this.allowPaidProviders && !requirement.allowPaid)) {
           return false;
@@ -113,7 +261,7 @@ class VideoProviderRegistry {
       });
 
     // Sort by priority descending (Local free providers have highest priority 100)
-    available.sort((a, b) => b.priority - a.priority);
+    available.sort((a, b) => (b.priority || 0) - (a.priority || 0));
 
     if (available.length === 0) {
       return this.getProvider('local_canvas');
@@ -138,7 +286,8 @@ class VideoProviderRegistry {
       const providerId = scene.provider || (options.provider || 'local_canvas');
       const provider = this.getProvider(providerId) || this.getProvider('local_canvas');
       const duration = Number(scene.duration || 4.5);
-      const sceneCost = Number((provider.costPerSec * duration).toFixed(4));
+      const costPerSec = Number(provider.costPerSec || 0.0);
+      const sceneCost = Number((costPerSec * duration).toFixed(4));
 
       totalCost += sceneCost;
       if (provider.tier === PROVIDER_TIERS.PAID) dominantTier = PROVIDER_TIERS.PAID;
@@ -173,5 +322,16 @@ class VideoProviderRegistry {
 
 module.exports = {
   VideoProviderRegistry,
-  PROVIDER_TIERS
+  PROVIDER_TIERS,
+  BaseVideoProviderAdapter,
+  LocalCanvasProviderAdapter,
+  LivePortraitProviderAdapter,
+  FreeStockVideoProviderAdapter,
+  LocalGPUVideoProviderAdapter,
+  GeminiMediaProviderAdapter,
+  KlingProviderAdapter,
+  RunwayProviderAdapter,
+  VeoProviderAdapter,
+  MinimaxProviderAdapter,
+  GoogleVeoProvider: require('./google-veo-provider').GoogleVeoProvider
 };

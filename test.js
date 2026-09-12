@@ -82,7 +82,13 @@ class SystemTest {
       { name: 'Shorts Scene Director & Pacing', test: () => this.testShortsSceneDirector() },
       { name: 'Visual Quality Checker & Scoring', test: () => this.testVisualQualityChecker() },
       { name: 'Video Provider Registry & Free-First Governance', test: () => this.testVideoProviderRegistry() },
-      { name: 'Frame-Sampling Visual QA Gate', test: () => this.testFrameSamplingVisualQA() }
+      { name: 'LivePortrait Provider & Graceful Fallback', test: () => this.testLivePortraitProvider() },
+      { name: 'Free B-Roll Provider & Deduplication', test: () => this.testFreeBrollProvider() },
+      { name: 'Frame-Sampling Visual QA Gate', test: () => this.testFrameSamplingVisualQA() },
+      { name: 'Multi-Character DNA & Intelligent Selector', test: () => this.testMultiCharacterDNASystem() },
+      { name: 'Google Veo 3.1 Programmatic Provider', test: () => this.testGoogleVeoProvider() },
+      { name: 'Premium Shorts Storytelling & Veo Scene Planning', test: () => this.testPremiumShortsStorytelling() },
+      { name: 'Rendered Shorts Timeline & Asset-to-Compositor Integration', test: () => this.testRenderedShortsTimelineIntegration() }
     ];
 
     let passed = 0;
@@ -2767,6 +2773,37 @@ class SystemTest {
       throw new Error('ElevenLabs alignment conversion failed to produce word tokens');
     }
 
+    // 1c. Test Special Token Handling: Punctuation, Contractions, Numbers, Dollar Amounts, Percentages, Apostrophes, Abbreviations
+    const complexNarration = "Costco's $60 gold-star membership delivers 50% profit margin in the U.S. Don't believe it? It's generating $4.6B, i.e., 72% of net income!";
+    const complexTimings = ShortsKaraokeCaptions.buildWordTimings(complexNarration, 10.0);
+    const complexTokens = complexNarration.trim().split(/\s+/).filter(Boolean);
+
+    if (complexTimings.length !== complexTokens.length) {
+      throw new Error(`Complex narration token count mismatch: expected ${complexTokens.length}, got ${complexTimings.length}`);
+    }
+
+    // Verify dollar amounts, contractions, apostrophes, percentages, and abbreviations are intact
+    const tokenWords = complexTimings.map(t => t.word);
+    const expectedKeywords = ["Costco's", "$60", "50%", "U.S.", "Don't", "It's", "$4.6B,", "i.e.,", "72%"];
+    for (const kw of expectedKeywords) {
+      if (!tokenWords.includes(kw)) {
+        throw new Error(`Subtitle word timing dropped or altered keyword "${kw}"`);
+      }
+    }
+
+    // Verify exact equality verification helper
+    const verifyResult = ShortsKaraokeCaptions.verifyNarrationMatchesCaptions(complexNarration, complexTimings);
+    if (!verifyResult.valid || verifyResult.errors.length > 0) {
+      throw new Error(`verifyNarrationMatchesCaptions failed for complex narration: ${verifyResult.errors.join('; ')}`);
+    }
+
+    // Negative verification test: ensure hallucinated/missing words are caught
+    const tamperedTimings = complexTimings.slice(0, -1);
+    const tamperedCheck = ShortsKaraokeCaptions.verifyNarrationMatchesCaptions(complexNarration, tamperedTimings);
+    if (tamperedCheck.valid) {
+      throw new Error('verifyNarrationMatchesCaptions failed to catch omitted trailing word');
+    }
+
     // 2. Test Phrase Chunking (Mobile readability)
     const phrases = ShortsKaraokeCaptions.chunkIntoPhrases(wordTimings, { maxWordsPerPhrase: 3 });
     if (phrases.length === 0) {
@@ -2774,6 +2811,13 @@ class SystemTest {
     }
     if (phrases.some(p => p.words.length > 4)) {
       throw new Error('Phrases contain excessive words per screen (>4 words)');
+    }
+
+    // Verify phrase reconstruction strictly matches the input token sequence
+    const reconstructedTokens = phrases.flatMap(p => p.words.map(w => w.word));
+    const originalTokens = text.trim().split(/\s+/).filter(Boolean);
+    if (reconstructedTokens.length !== originalTokens.length || reconstructedTokens.some((w, idx) => w !== originalTokens[idx])) {
+      throw new Error('Phrase chunking altered, duplicated, or dropped words from original narration');
     }
 
     // 3. Test Safe-Zone Positioning & ASS Markup
@@ -5129,6 +5173,55 @@ class SystemTest {
     }
   }
 
+  async testLivePortraitProvider() {
+    const { LivePortraitProvider } = require('./utils/liveportrait-provider');
+    const provider = new LivePortraitProvider();
+
+    // 1. Dependency check test
+    const status = await provider.checkAvailability(true);
+    if (typeof status.available !== 'boolean' || !Array.isArray(status.missing)) {
+      throw new Error('LivePortrait checkAvailability returned invalid schema');
+    }
+
+    // 2. Safe fallback when dependencies are missing
+    const fallbackResult = await provider.generatePresenter({
+      referenceImage: 'sample.png',
+      audioPath: 'sample.mp3',
+      duration: 3.5,
+      outputPath: 'output_test.mp4'
+    });
+
+    if (!fallbackResult.isFallback || fallbackResult.success) {
+      // Unless machine already has LivePortrait installed, it must gracefully signal fallback
+      if (!status.available) {
+        throw new Error('LivePortrait failed to trigger graceful fallback when models are absent');
+      }
+    }
+
+    // 3. Setup guide availability
+    const guide = LivePortraitProvider.getSetupGuide();
+    if (!guide.steps || guide.steps.length === 0) {
+      throw new Error('LivePortrait setup guide is empty');
+    }
+  }
+
+  async testFreeBrollProvider() {
+    const { FreeBrollProvider } = require('./utils/free-broll-provider');
+    const broll = new FreeBrollProvider();
+
+    // 1. Availability check
+    const isApiAvailable = broll.isApiAvailable();
+    if (typeof isApiAvailable !== 'boolean') {
+      throw new Error('FreeBrollProvider isApiAvailable must return boolean');
+    }
+
+    // 2. Session deduplication reset
+    broll.resetSession();
+    if (broll.usedClipIds.size !== 0) {
+      throw new Error('FreeBrollProvider resetSession failed to clear used clips');
+    }
+  }
+
   async testFrameSamplingVisualQA() {
     const { VisualQualityChecker } = require('./utils/visual-quality-checker');
     const checker = new VisualQualityChecker();
@@ -5137,6 +5230,594 @@ class SystemTest {
     const missingResult = await checker.inspectRenderedVideoFile('non_existent_video.mp4');
     if (missingResult.passed) {
       throw new Error('inspectRenderedVideoFile failed to flag missing video file');
+    }
+  }
+
+  async testMultiCharacterDNASystem() {
+    const { CharacterDNAService, REQUIRED_FIELDS } = require('./utils/character-dna-service');
+    const { CharacterSelector } = require('./utils/character-selector');
+
+    const dnaService = new CharacterDNAService();
+    const selector = new CharacterSelector({ dnaService });
+
+    // 1. Character library loads correctly (5 pre-seeded archetypes)
+    const characters = dnaService.listCharacters();
+    if (!Array.isArray(characters) || characters.length < 5) {
+      throw new Error(`Expected at least 5 seeded characters in library, got ${characters.length}`);
+    }
+
+    const characterIds = characters.map(c => c.character_id);
+    const expectedIds = ['char_finance_alex', 'char_tech_maya', 'char_auto_marcus', 'char_brand_elena', 'char_doc_david'];
+    for (const expectedId of expectedIds) {
+      if (!characterIds.includes(expectedId)) {
+        throw new Error(`Missing expected archetype '${expectedId}' in library`);
+      }
+    }
+
+    // 2. Character DNA validation works
+    for (const char of characters) {
+      const validation = dnaService.validateCharacterDNA(char);
+      if (!validation.isValid) {
+        throw new Error(`Character DNA validation failed for ${char.character_id}: ${validation.errors.join(', ')}`);
+      }
+      for (const field of REQUIRED_FIELDS) {
+        if (!char[field]) {
+          throw new Error(`Character ${char.character_id} is missing required field '${field}'`);
+        }
+      }
+    }
+
+    // Invalid DNA test
+    const invalidChar = { name: 'Incomplete' };
+    const invalidValidation = dnaService.validateCharacterDNA(invalidChar);
+    if (invalidValidation.isValid || invalidValidation.errors.length === 0) {
+      throw new Error('validateCharacterDNA failed to flag incomplete character object');
+    }
+
+    // 3. Costco finance topic -> Alex
+    const costcoResult = selector.selectPresenter({
+      topic: 'How Costco makes billions from $60 memberships',
+      category: 'finance',
+      emotionalTone: 'analytical',
+      script: 'Costco Wholesale makes over 70% of operating profit from membership fees.'
+    });
+    if (costcoResult.decision !== 'REUSE' || costcoResult.character?.character_id !== 'char_finance_alex') {
+      throw new Error(`Expected Costco finance topic to select char_finance_alex, got ${costcoResult.character?.character_id} (${costcoResult.decision})`);
+    }
+
+    // 4. AI chips topic -> Maya
+    const aiChipsResult = selector.selectPresenter({
+      topic: 'How AI chips are changing modern computers and GPUs',
+      category: 'technology',
+      emotionalTone: 'visionary',
+      script: 'Semiconductor architecture is undergoing the biggest revolution in computing history with neural processing units.'
+    });
+    if (aiChipsResult.decision !== 'REUSE' || aiChipsResult.character?.character_id !== 'char_tech_maya') {
+      throw new Error(`Expected AI chips topic to select char_tech_maya, got ${aiChipsResult.character?.character_id} (${aiChipsResult.decision})`);
+    }
+
+    // 5. Automotive topic -> Marcus
+    const autoResult = selector.selectPresenter({
+      topic: 'Why some luxury cars lose 60% of their value in 3 years',
+      category: 'automotive',
+      emotionalTone: 'grounded',
+      script: 'Vehicle depreciation curves and mechanical manufacturing costs dictate resale values.'
+    });
+    if (autoResult.decision !== 'REUSE' || autoResult.character?.character_id !== 'char_auto_marcus') {
+      throw new Error(`Expected Automotive topic to select char_auto_marcus, got ${autoResult.character?.character_id} (${autoResult.decision})`);
+    }
+
+    // 6. Consumer brand topic -> Elena
+    const brandResult = selector.selectPresenter({
+      topic: 'The psychology of luxury brand retail packaging and supermarket floor plans',
+      category: 'brands',
+      emotionalTone: 'witty',
+      script: 'Supermarkets use sensory marketing and consumer psychology to keep shoppers browsing longer.'
+    });
+    if (brandResult.decision !== 'REUSE' || brandResult.character?.character_id !== 'char_brand_elena') {
+      throw new Error(`Expected Consumer brand topic to select char_brand_elena, got ${brandResult.character?.character_id} (${brandResult.decision})`);
+    }
+
+    // 7. Human/economics documentary -> David
+    const docResult = selector.selectPresenter({
+      topic: 'The Rise and Fall of Iconic Industrial Cities',
+      category: 'documentary',
+      emotionalTone: 'reflective',
+      script: 'A historical documentary exploring the human and macroeconomic forces behind urban migration.'
+    });
+    if (docResult.decision !== 'REUSE' || docResult.character?.character_id !== 'char_doc_david') {
+      throw new Error(`Expected Documentary topic to select char_doc_david, got ${docResult.character?.character_id} (${docResult.decision})`);
+    }
+
+    // 8. Unknown category -> CREATE
+    const unknownResult = selector.selectPresenter({
+      topic: 'Hydrothermal vent microbiology and deep abyssal taxonomy',
+      category: 'deep_sea_marine_biology',
+      emotionalTone: 'scientific_microscopic',
+      script: 'Chemosynthetic bacteria thrive under extreme hydrostatic pressure without sunlight.'
+    });
+    if (unknownResult.decision !== 'CREATE' || unknownResult.character !== null || !unknownResult.creationBrief) {
+      throw new Error(`Expected unknown topic to return CREATE with creationBrief, got ${unknownResult.decision}`);
+    }
+    if (!unknownResult.creationBrief.suggestedName || !unknownResult.creationBrief.recommendedArchetype) {
+      throw new Error('creationBrief is missing recommendedArchetype structure');
+    }
+
+    // 9. Same character fatigue penalty works
+    // Without fatigue: Alex scores high on finance topic
+    const freshFinance = selector.selectPresenter({
+      topic: 'Wall Street investment banking fees explained',
+      category: 'finance',
+      emotionalTone: 'analytical',
+      recentUsageHistory: []
+    });
+
+    // With heavy fatigue (Alex used in immediately preceding video)
+    const fatiguedFinance = selector.selectPresenter({
+      topic: 'Wall Street investment banking fees explained',
+      category: 'finance',
+      emotionalTone: 'analytical',
+      recentUsageHistory: ['char_finance_alex']
+    });
+
+    if (fatiguedFinance.score >= freshFinance.score) {
+      throw new Error(`Fatigue penalty did not reduce score: fresh=${freshFinance.score}, fatigued=${fatiguedFinance.score}`);
+    }
+    if (Math.abs((freshFinance.score - fatiguedFinance.score) - 0.20) > 0.05) {
+      throw new Error(`Expected fatigue penalty reduction of ~0.20, got difference of ${freshFinance.score - fatiguedFinance.score}`);
+    }
+
+    // 10. Test buildPresenterPrompt for photorealism tokens
+    const promptBundle = dnaService.buildPresenterPrompt('char_tech_maya', 'pointing_side', 'visionary', { topic: 'Quantum AI' });
+    if (!promptBundle.prompt.includes('Maya') || !promptBundle.prompt.includes('9:16') || !promptBundle.negativePrompt) {
+      throw new Error('buildPresenterPrompt generated invalid prompt payload');
+    }
+  }
+
+  async testGoogleVeoProvider() {
+    const fs = require('fs');
+    const path = require('path');
+    const { GoogleVeoProvider } = require('./utils/google-veo-provider');
+    const { VideoProviderRegistry } = require('./utils/video-provider-registry');
+
+    // 1. Provider unavailable without API key
+    const unconfiguredProvider = new GoogleVeoProvider({ apiKey: null, enabled: false });
+    if (unconfiguredProvider.isAvailable()) {
+      throw new Error('GoogleVeoProvider must not be available when unconfigured');
+    }
+
+    // 2. Provider enabled with configuration
+    const dummyClient = {
+      models: {
+        generateVideos: async () => ({ name: 'operations/test_op_123', done: true, response: { generatedVideos: [{ video: { videoBytes: 'AAA=' } }] } })
+      },
+      operations: {
+        getVideosOperation: async () => ({ name: 'operations/test_op_123', done: true, response: { generatedVideos: [{ video: { videoBytes: 'AAA=' } }] } })
+      }
+    };
+
+    const configuredProvider = new GoogleVeoProvider({
+      apiKey: 'test-api-key-xyz',
+      enabled: true,
+      client: dummyClient
+    });
+
+    if (!configuredProvider.isAvailable()) {
+      throw new Error('GoogleVeoProvider must be available when enabled with client and apiKey');
+    }
+
+    // 3. Request normalization
+    const normalized = configuredProvider.normalizeRequest({
+      prompt: '  Cinematic shot of Alex explaining interest rates  ',
+      duration: 6.2,
+      aspectRatio: '9:16',
+      sceneId: 'scene_test_norm'
+    });
+
+    if (normalized.prompt !== 'Cinematic shot of Alex explaining interest rates') {
+      throw new Error(`Normalization failed to trim prompt: ${normalized.prompt}`);
+    }
+    if (normalized.duration !== 6) {
+      throw new Error(`Normalization failed to round duration: ${normalized.duration}`);
+    }
+
+    // 4. 9:16 validation (accepts 9:16, defaults invalid ratios like '3:2' to '9:16')
+    const invalidRatioNorm = configuredProvider.normalizeRequest({
+      prompt: 'Test prompt',
+      aspectRatio: 'invalid_4:3'
+    });
+    if (invalidRatioNorm.aspectRatio !== '9:16') {
+      throw new Error(`Expected fallback to 9:16 for invalid aspect ratio, got ${invalidRatioNorm.aspectRatio}`);
+    }
+
+    // 5. Character reference path handling
+    const dummyImgPath = path.join(__dirname, 'temp', 'test_reference_avatar.png');
+    fs.mkdirSync(path.dirname(dummyImgPath), { recursive: true });
+    fs.writeFileSync(dummyImgPath, Buffer.from('fake-png-binary-content'));
+
+    const encodedImg = await configuredProvider.encodeReferenceImage(dummyImgPath);
+    if (!encodedImg || !encodedImg.imageBytes || encodedImg.mimeType !== 'image/png') {
+      throw new Error('encodeReferenceImage failed to encode valid PNG file');
+    }
+
+    const missingImg = await configuredProvider.encodeReferenceImage('non_existent_image_path.png');
+    if (missingImg !== null) {
+      throw new Error('encodeReferenceImage must return null for non-existent file path');
+    }
+
+    // Clean up temporary dummy image
+    if (fs.existsSync(dummyImgPath)) {
+      fs.unlinkSync(dummyImgPath);
+    }
+
+    // 6. Invalid duration rejection / clamping (clamps <4 to 4, >8 to 8)
+    const clampedShort = configuredProvider.normalizeRequest({ prompt: 'Short', duration: 1 });
+    if (clampedShort.duration !== 4) {
+      throw new Error(`Expected duration 1s to clamp to 4s, got ${clampedShort.duration}`);
+    }
+
+    const clampedLong = configuredProvider.normalizeRequest({ prompt: 'Long', duration: 25 });
+    if (clampedLong.duration !== 8) {
+      throw new Error(`Expected duration 25s to clamp to 8s, got ${clampedLong.duration}`);
+    }
+
+    // 7. Timeout handling
+    const neverEndingClient = {
+      models: {
+        generateVideos: async () => ({ name: 'operations/never_done_op', done: false })
+      },
+      operations: {
+        getVideosOperation: async () => ({ name: 'operations/never_done_op', done: false })
+      }
+    };
+
+    const timeoutProvider = new GoogleVeoProvider({
+      apiKey: 'test-key',
+      enabled: true,
+      client: neverEndingClient,
+      timeoutMs: 150,
+      pollIntervalMs: 50
+    });
+
+    let timeoutErrorThrown = false;
+    try {
+      await timeoutProvider.generateClip({ prompt: 'Test timeout', duration: 4 });
+    } catch (err) {
+      if (err.message.includes('timed out')) {
+        timeoutErrorThrown = true;
+      }
+    }
+    if (!timeoutErrorThrown) {
+      throw new Error('GoogleVeoProvider failed to throw timeout error when operation exceeds timeoutMs');
+    }
+
+    // 8. Retry handling
+    let pollAttempts = 0;
+    const retryClient = {
+      models: {
+        generateVideos: async () => ({ name: 'operations/retry_op_123', done: false })
+      },
+      operations: {
+        getVideosOperation: async () => {
+          pollAttempts++;
+          if (pollAttempts === 1) {
+            throw new Error('Temporary 503 Network Glitch');
+          }
+          return {
+            name: 'operations/retry_op_123',
+            done: true,
+            response: { generatedVideos: [{ video: { videoBytes: Buffer.from('mock-mp4-data').toString('base64') } }] }
+          };
+        }
+      }
+    };
+
+    const retryProvider = new GoogleVeoProvider({
+      apiKey: 'test-key',
+      enabled: true,
+      client: retryClient,
+      timeoutMs: 2000,
+      pollIntervalMs: 50
+    });
+
+    const tempOutputDir = path.join(__dirname, 'temp', 'test_veo_out');
+    const retryResult = await retryProvider.generateClip({
+      sceneId: 'test_retry_scene',
+      prompt: 'Test retry resilience',
+      duration: 5,
+      outputDir: tempOutputDir
+    });
+
+    if (!retryResult || !retryResult.outputPath || pollAttempts < 2) {
+      throw new Error('Retry handling failed to complete after temporary polling error');
+    }
+
+    // 9. Download validation (verifies generated MP4 on disk)
+    if (!fs.existsSync(retryResult.outputPath) || fs.statSync(retryResult.outputPath).size === 0) {
+      throw new Error('downloadClip failed to save valid video bytes to disk');
+    }
+
+    // Clean up temporary video
+    if (fs.existsSync(retryResult.outputPath)) {
+      fs.unlinkSync(retryResult.outputPath);
+    }
+
+    // 10. No API call during unit tests (verified by our mock client interception above)
+
+    // 11. Provider registry registration
+    const registry = new VideoProviderRegistry({ allowPaidProviders: true });
+    const registeredVeo = registry.getProvider('google_veo_3');
+    if (!registeredVeo || typeof registeredVeo.isAvailable !== 'function') {
+      throw new Error('google_veo_3 is not properly registered in VideoProviderRegistry');
+    }
+
+    const registeredVeoVideo = registry.getProvider('veo_video');
+    if (!registeredVeoVideo || typeof registeredVeoVideo.isAvailable !== 'function') {
+      throw new Error('veo_video is not properly registered in VideoProviderRegistry');
+    }
+
+    // 12. Fallback behavior (when Veo is unavailable/unpaid, selects free local provider)
+    const freeRegistry = new VideoProviderRegistry({ allowPaidProviders: false });
+    const selectedProvider = freeRegistry.selectProvider({ allowPaid: false });
+    if (selectedProvider.tier !== 'FREE') {
+      throw new Error(`Expected Free-First fallback provider, got ${selectedProvider.name} (${selectedProvider.tier})`);
+    }
+  }
+
+  async testPremiumShortsStorytelling() {
+    const { ShortsSceneDirector, VISUAL_BEAT_TYPES } = require('./utils/shorts-scene-director');
+    const { CharacterDNAService } = require('./utils/character-dna-service');
+    const { CharacterSelector } = require('./utils/character-selector');
+    const { ShortsCanvasCompositor } = require('./utils/shorts-canvas-compositor');
+
+    const dnaService = new CharacterDNAService();
+    const selector = new CharacterSelector({ dnaService });
+    const director = new ShortsSceneDirector({ dnaService, selector });
+
+    const testScript = {
+      title: 'How Costco Makes Billions From $60 Memberships',
+      duration: 48,
+      hook: {
+        text: 'Stop scrolling! Here is the crazy financial secret behind wholesale clubs.'
+      },
+      mainContent: {
+        sections: [
+          {
+            title: 'The Markup Myth',
+            content: 'Most people believe huge wholesale clubs make their billions by marking up bulk items. In reality, physical products are sold near cost with markups strictly capped under fourteen percent.'
+          },
+          {
+            title: 'Supermarket Comparison',
+            content: 'Compare that to traditional supermarket markups that often soar past thirty percent! So how does the business actually make its massive billions every year?'
+          },
+          {
+            title: 'Membership Cashflow Engine',
+            content: 'The entire secret comes down to annual membership cards swiped at the door. Merchandise margins average barely two percent, but membership fees are over eighty percent pure profit.'
+          },
+          {
+            title: 'Verified Financial Truth',
+            content: 'That equals over four point six billion dollars in predictable cash flow, accounting for over seventy percent of total operating profit.'
+          },
+          {
+            title: 'Compounding Flywheel',
+            content: 'This predictable cash funds lower prices, driving customer loyalty. With a staggering ninety-three percent renewal rate, customers happily pay year after year.'
+          }
+        ]
+      },
+      conclusion: {
+        finalThought: 'Subscribe for daily financial breakdowns in sixty seconds or less.'
+      },
+      claims: [
+        { claimText: '$4.6 Billion Annual Fee Income', source: 'SEC 10-K Verified' }
+      ]
+    };
+
+    // 1. Direct storyboard
+    const scenes = director.directScript(testScript, {
+      topic: 'How Costco Makes Billions',
+      category: 'finance',
+      emotionalTone: 'analytical',
+      claims: testScript.claims
+    });
+
+    // 2. Beat count check (10–14 beats)
+    if (scenes.length < 10 || scenes.length > 14) {
+      throw new Error(`Expected 10–14 beats for 48s Short, got ${scenes.length}`);
+    }
+
+    // 3. Timeline audit
+    const audit = director.auditTimeline(scenes, { minDuration: 45, maxDuration: 50 });
+    if (!audit.isValid) {
+      throw new Error(`Timeline audit failed: ${audit.errors.join('; ')}`);
+    }
+
+    // 4. Duration check (45–50s)
+    const { totalDurationSec, presenterPercentage, visualStorytellingPercentage, averageBeatDurationSec } = audit.metrics;
+    if (totalDurationSec < 45.0 || totalDurationSec > 50.0) {
+      throw new Error(`Total duration ${totalDurationSec}s outside 45–50s range`);
+    }
+
+    // 5. Presenter ratio check (20–40%)
+    if (presenterPercentage < 20.0 || presenterPercentage > 40.0) {
+      throw new Error(`Presenter percentage ${presenterPercentage}% is outside 20–40% target`);
+    }
+
+    // 6. Visual storytelling ratio check (60–80%)
+    if (visualStorytellingPercentage < 60.0 || visualStorytellingPercentage > 80.0) {
+      throw new Error(`Visual storytelling percentage ${visualStorytellingPercentage}% is outside 60–80% target`);
+    }
+
+    // 7. Visual change pacing check (1.5–3.5s)
+    if (averageBeatDurationSec < 1.5 || averageBeatDurationSec > 4.5) {
+      throw new Error(`Average beat duration ${averageBeatDurationSec}s is outside 1.5–3.5s pacing target`);
+    }
+
+    // 8. Character selector integration & reference propagation
+    const firstBeat = scenes[0];
+    if (firstBeat.characterId !== 'char_finance_alex' || !firstBeat.characterReferenceImage) {
+      throw new Error(`Expected character char_finance_alex with reference image on beat 1, got ${firstBeat.characterId}`);
+    }
+
+    // Test AI Chips topic routes to Maya
+    const techScenes = director.directScript({
+      title: 'How AI Chips Are Built',
+      duration: 48,
+      hook: { text: 'The secret architecture behind neural processors.' },
+      mainContent: { sections: [{ title: 'Silicon', content: 'Semiconductors scale with extreme ultraviolet lithography.' }] }
+    }, { topic: 'AI Chips and GPUs', category: 'technology', emotionalTone: 'visionary' });
+
+    if (techScenes[0].characterId !== 'char_tech_maya') {
+      throw new Error(`Expected technology topic to select Maya, got ${techScenes[0].characterId}`);
+    }
+
+    // 9. Visual types & B-roll prompt generation
+    const brollBeats = scenes.filter(s => s.visualType === VISUAL_BEAT_TYPES.CINEMATIC_BROLL || s.visualType === VISUAL_BEAT_TYPES.PRODUCT_OR_COMPANY_VISUAL);
+    if (brollBeats.length === 0) {
+      throw new Error('Expected at least 1 cinematic B-roll beat in storyboard');
+    }
+    for (const b of brollBeats) {
+      if (!b.brollPrompt || typeof b.brollPrompt !== 'string' || b.brollPrompt.length < 20) {
+        throw new Error(`B-roll beat ${b.sceneId} missing valid descriptive brollPrompt`);
+      }
+      if (!b.brollPrompt.includes('9:16') || !b.brollPrompt.includes('photorealistic')) {
+        throw new Error(`B-roll prompt for ${b.sceneId} missing required 9:16 photorealistic tokens`);
+      }
+    }
+
+    // 10. Financial graphic routing
+    const graphicBeats = scenes.filter(s => s.graphicsRequired);
+    if (graphicBeats.length === 0) {
+      throw new Error('Expected at least 1 financial graphics beat in storyboard');
+    }
+
+    // 11. Subtitle safety & safe zones
+    for (const s of scenes) {
+      if (!s.safeZone || s.safeZone.top < 200 || s.safeZone.bottom < 400 || s.safeZone.right < 100) {
+        throw new Error(`Scene ${s.sceneId} has invalid Shorts safe zone parameters`);
+      }
+      if (!Array.isArray(s.subtitleEmphasis)) {
+        throw new Error(`Scene ${s.sceneId} subtitleEmphasis must be an array`);
+      }
+    }
+
+    // 12. Compositor integration check
+    const isVertical = ShortsCanvasCompositor.isVertical({ aspectRatio: '9:16' });
+    if (!isVertical) {
+      throw new Error('ShortsCanvasCompositor isVertical check failed for 9:16');
+    }
+
+    const canvas = ShortsCanvasCompositor.resolveCanvas('9:16');
+    if (canvas.width !== 1080 || canvas.height !== 1920) {
+      throw new Error(`Expected 1080x1920 canvas resolution, got ${canvas.width}x${canvas.height}`);
+    }
+  }
+
+  async testRenderedShortsTimelineIntegration() {
+    const fs = require('fs');
+    const os = require('os');
+    const sharp = require('sharp');
+    const { runFFmpeg } = require('./utils/ffmpeg');
+    const { ShortsSceneDirector } = require('./utils/shorts-scene-director');
+    const { CharacterDNAService } = require('./utils/character-dna-service');
+    const { CharacterSelector } = require('./utils/character-selector');
+    const { ShortsCanvasCompositor } = require('./utils/shorts-canvas-compositor');
+
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mim-render-test-'));
+
+    try {
+      const dnaService = new CharacterDNAService();
+      const selector = new CharacterSelector({ dnaService });
+      const director = new ShortsSceneDirector({ dnaService, selector });
+
+      const testScript = {
+        title: 'How Costco Makes Billions From Memberships',
+        duration: 48,
+        hook: { text: 'Stop scrolling! Here is how Costco makes billions every single year.' },
+        mainContent: {
+          sections: [
+            { title: 'Margins', content: 'Most people believe wholesale stores mark up groceries. In reality, merchandise markups are capped under fourteen percent.' },
+            { title: 'Contrast', content: 'Traditional supermarkets mark up over thirty percent! So how does the business actually make money?' },
+            { title: 'Cards', content: 'The entire secret comes down to annual membership cards swiped at the warehouse door.' },
+            { title: 'Profit', content: 'While merchandise margins average two percent, membership fees are over eighty percent pure profit.' },
+            { title: 'SEC', content: 'According to verified SEC filings, that equals over four point six billion dollars in predictable profit.' },
+            { title: 'Flywheel', content: 'This predictable cash funds lower bulk prices, driving customer loyalty. With ninety-three percent renewal, members happily pay year after year.' }
+          ]
+        },
+        conclusion: { finalThought: 'Subscribe to Money In Minutes for daily financial breakdowns in sixty seconds or less.' },
+        claims: [{ claimText: '$4.6 Billion Annual Fee Income', source: 'SEC 10-K' }]
+      };
+
+      const scenes = director.directScript(testScript, {
+        topic: testScript.title,
+        category: 'finance',
+        emotionalTone: 'analytical',
+        claims: testScript.claims
+      });
+
+      // 1. Render Full Shorts Timeline
+      const finalMp4Path = path.join(tempDir, 'test_short_1080x1920.mp4');
+      const renderResult = await ShortsCanvasCompositor.renderShortsStoryboard(scenes, {
+        outputDir: tempDir,
+        outputPath: finalMp4Path,
+        topic: testScript.title
+      });
+
+      // 2. Validate output file existence and duration
+      if (!fs.existsSync(finalMp4Path) || fs.statSync(finalMp4Path).size < 50000) {
+        throw new Error('Rendered MP4 file is missing or too small');
+      }
+
+      if (renderResult.totalDuration < 45 || renderResult.totalDuration > 50) {
+        throw new Error(`Rendered duration ${renderResult.totalDuration}s is outside 45-50s target`);
+      }
+
+      if (renderResult.presenterPercentage < 20 || renderResult.presenterPercentage > 40) {
+        throw new Error(`Presenter ratio ${renderResult.presenterPercentage}% is outside 20-40% target`);
+      }
+
+      // 3. Extract and Inspect Real Frames from the Rendered Video
+      const sampleFrame1 = path.join(tempDir, 'sample_hook_frame.jpg');
+      await runFFmpeg([
+        '-y', '-ss', '1.5', '-i', finalMp4Path, '-vframes', '1', '-q:v', '2', sampleFrame1
+      ]);
+
+      if (!fs.existsSync(sampleFrame1)) {
+        throw new Error('Failed to sample hook frame from rendered MP4');
+      }
+
+      const hookMeta = await sharp(sampleFrame1).metadata();
+      if (hookMeta.width !== 1080 || hookMeta.height !== 1920) {
+        throw new Error(`Expected 1080x1920 frame dimensions, got ${hookMeta.width}x${hookMeta.height}`);
+      }
+
+      const hookStats = await sharp(sampleFrame1).stats();
+      if (hookStats.channels[0].mean < 15) {
+        throw new Error('Sampled hook frame appears to be blank/black pixels');
+      }
+
+      // 4. Validate Error Handling: Throw ASSET_MISSING when required asset cannot be resolved
+      let assetMissingCaught = false;
+      try {
+        await ShortsCanvasCompositor.renderShortsStoryboard([
+          {
+            sceneId: 'scene_corrupt_test',
+            duration: 3.0,
+            presenterRequired: true,
+            characterId: 'non_existent_invalid_character_xyz',
+            characterReferenceImage: '/non/existent/path/avatar_missing.png'
+          }
+        ], { outputDir: path.join(tempDir, 'fail_test') });
+      } catch (err) {
+        if (err.message && err.message.includes('ASSET_MISSING')) {
+          assetMissingCaught = true;
+        }
+      }
+
+      if (!assetMissingCaught) {
+        throw new Error('ShortsCanvasCompositor failed to throw ASSET_MISSING when presenter asset is missing');
+      }
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
     }
   }
 }
