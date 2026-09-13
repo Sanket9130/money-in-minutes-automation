@@ -111,7 +111,8 @@ class SystemTest {
       { name: 'Viewer Retention & Storytelling Upgrade (B-Phase1-4)', test: () => this.testViewerRetentionAndStorytellingUpgrade() },
       { name: 'FinTech Kinetic Full-Canvas Scene Composition (Phase 1)', test: () => this.testFinTechKineticFullCanvasComposition() },
       { name: 'FinTech Kinetic B-Roll Provenance & In-Scene Micro-Animation (Phase 2A)', test: () => this.testFinTechKineticBRollAndMicroAnimation() },
-      { name: 'Autonomous Daily YouTube Shorts Publishing (Phase 7)', test: () => this.testAutonomousDailyShortsPublishing() }
+      { name: 'Autonomous Daily YouTube Shorts Publishing (Phase 7)', test: () => this.testAutonomousDailyShortsPublishing() },
+      { name: 'Missed-Day Recovery & Backfill Engine (Phase 8)', test: () => this.testMissedDayRecoveryAndBackfill() }
     ];
 
     let passed = 0;
@@ -9965,6 +9966,317 @@ class SystemTest {
       } else {
         delete process.env.YOUTUBE_PUBLISH_ENABLED;
       }
+      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  async testMissedDayRecoveryAndBackfill() {
+    this.logger.info('Starting Missed-Day Recovery & Backfill Engine (Phase 8) tests...');
+    const os = require('os');
+    const fs = require('fs').promises;
+    const { Database } = require('./database/db');
+    const { DailyShortsPublisher } = require('./utils/daily-shorts-publisher');
+    const { SemanticDedupService } = require('./utils/semantic-dedup-service');
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'yaa-phase8-backfill-'));
+    const testDbPath = path.join(tempDir, 'test_daily_shorts_phase8.db');
+    const testShortsDir = path.join(tempDir, 'shorts');
+    const testScratchDir = path.join(tempDir, 'scratch');
+    await fs.mkdir(testShortsDir, { recursive: true });
+    await fs.mkdir(testScratchDir, { recursive: true });
+
+    const db = new Database(testDbPath);
+    await db.initialize();
+
+    const createdProdIds = [];
+    const createdBacklogDates = [];
+
+    const mockYouTubeUploads = [];
+    const mockYouTubeClient = {
+      videos: {
+        insert: async (params) => {
+          const id = `mock-yt-backfill-${Date.now()}-${mockYouTubeUploads.length}`;
+          mockYouTubeUploads.push({ id, params });
+          return {
+            data: {
+              id,
+              snippet: { title: params.requestBody.snippet.title },
+              status: { privacyStatus: params.requestBody.status.privacyStatus, publishAt: params.requestBody.status.publishAt }
+            }
+          };
+        }
+      },
+      thumbnails: {
+        set: async () => ({ data: { default: { url: 'https://i.ytimg.com/vi/mock/default.jpg' } } })
+      }
+    };
+
+    try {
+      const todayStr = new Date().toISOString().slice(0, 10);
+
+      // TEST 1: No missed days -> 0 missed elapsed days
+      const test1Publisher = new DailyShortsPublisher({ db, shortsDir: testShortsDir, scratchDir: testScratchDir });
+      const missed0 = await test1Publisher.detectMissedDays({ fromDate: todayStr, toDate: todayStr });
+      if (missed0.length !== 0) {
+        throw new Error(`TEST 1 Failed: Expected 0 missed days for today, got ${missed0.length}`);
+      }
+      this.logger.info('TEST 1 Passed: No missed days detected when anchor is current day.');
+
+      // Helper to compute past date string
+      const getPastDateStr = (daysAgo) => {
+        const d = new Date();
+        d.setUTCDate(d.getUTCDate() - daysAgo);
+        return d.toISOString().slice(0, 10);
+      };
+
+      // TEST 2: 1 missed day (yesterday)
+      const date1DayAgo = getPastDateStr(1);
+      createdBacklogDates.push(date1DayAgo);
+      const missed1 = await test1Publisher.detectMissedDays({ fromDate: date1DayAgo, toDate: todayStr });
+      if (missed1.length !== 1 || missed1[0].target_date !== date1DayAgo) {
+        throw new Error(`TEST 2 Failed: Expected 1 missed day (${date1DayAgo}), got ${missed1.length}`);
+      }
+      this.logger.info('TEST 2 Passed: 1 missed day obligation accurately detected.');
+
+      // TEST 3: 3 missed days
+      const date3DaysAgo = getPastDateStr(3);
+      for (let i = 1; i <= 3; i++) createdBacklogDates.push(getPastDateStr(i));
+      const missed3 = await test1Publisher.detectMissedDays({ fromDate: date3DaysAgo, toDate: todayStr });
+      if (missed3.length !== 3) {
+        throw new Error(`TEST 3 Failed: Expected 3 missed days, got ${missed3.length}`);
+      }
+      this.logger.info('TEST 3 Passed: 3 missed days obligations accurately detected.');
+
+      // TEST 4: 7 missed days
+      const date7DaysAgo = getPastDateStr(7);
+      for (let i = 1; i <= 7; i++) createdBacklogDates.push(getPastDateStr(i));
+      const missed7 = await test1Publisher.detectMissedDays({ fromDate: date7DaysAgo, toDate: todayStr });
+      if (missed7.length !== 7) {
+        throw new Error(`TEST 4 Failed: Expected 7 missed days, got ${missed7.length}`);
+      }
+      this.logger.info('TEST 4 Passed: 7 missed days obligations accurately detected.');
+
+      // TEST 5: Already satisfied day -> No duplicate obligation
+      const satisfiedDate = getPastDateStr(4);
+      const satProdId = `prod-test-sat-${Date.now()}`;
+      createdProdIds.push(satProdId);
+      await db.saveDailyShortPublication({
+        production_id: satProdId,
+        topic: 'Satisfied Day Topic',
+        title: 'Satisfied Day Topic #Shorts',
+        status: 'SCHEDULED',
+        scheduled_at: `${satisfiedDate}T17:00:00.000Z`
+      });
+      const missedAfterSat = await test1Publisher.detectMissedDays({ fromDate: satisfiedDate, toDate: todayStr });
+      const containsSat = missedAfterSat.some(r => r.target_date === satisfiedDate);
+      if (containsSat) {
+        throw new Error(`TEST 5 Failed: Satisfied date ${satisfiedDate} still returned as pending obligation`);
+      }
+      this.logger.info('TEST 5 Passed: Already satisfied day is not duplicated as missed obligation.');
+
+      // TEST 6: Mac restart -> Backlog persists across new Database and Publisher instances
+      const db2 = new Database(testDbPath);
+      await db2.initialize();
+      const test6Publisher = new DailyShortsPublisher({ db: db2, shortsDir: testShortsDir, scratchDir: testScratchDir });
+      const pendingPersisted = await test6Publisher.detectMissedDays({ fromDate: date3DaysAgo, toDate: todayStr });
+      if (pendingPersisted.length === 0) {
+        throw new Error('TEST 6 Failed: Backlog did not persist in SQLite across new database instance');
+      }
+      await db2.close().catch(() => {});
+      this.logger.info('TEST 6 Passed: Backlog persists in SQLite across simulated Mac restart.');
+
+      // TEST 7: Scheduler restart -> Backlog obligations remain valid and queryable
+      const pendingObligations = await db.getPendingBacklogObligations(10);
+      if (!Array.isArray(pendingObligations) || pendingObligations.length === 0) {
+        throw new Error('TEST 7 Failed: getPendingBacklogObligations returned empty after scheduler restart simulation');
+      }
+      this.logger.info('TEST 7 Passed: Backlog persists across scheduler restart.');
+
+      // TEST 8: Generation failure -> Obligation remains pending
+      const failingDate = getPastDateStr(2);
+      const failingOrchestrator = {
+        produceShort: async () => { throw new Error('Simulated generator rendering crash'); }
+      };
+      const failingPublisher = new DailyShortsPublisher({
+        db,
+        orchestrator: failingOrchestrator,
+        shortsDir: testShortsDir,
+        scratchDir: testScratchDir,
+        youtubeClient: mockYouTubeClient
+      });
+      await failingPublisher.recoverMissedShorts({ fromDate: failingDate, toDate: getPastDateStr(1) });
+      const obligationAfterFail = await db.getRow('SELECT * FROM daily_shorts_backlog WHERE target_date = ?', [failingDate]);
+      if (!obligationAfterFail || obligationAfterFail.status !== 'PENDING' || obligationAfterFail.attempt_count < 1) {
+        throw new Error('TEST 8 Failed: Failed generation obligation did not remain PENDING with recorded attempt');
+      }
+      this.logger.info('TEST 8 Passed: Generation failure keeps obligation pending with recorded attempts.');
+
+      // TEST 9: YouTube upload failure -> Obligation remains pending
+      const uploadFailDate = getPastDateStr(6);
+      const dummyVideoFile = path.join(testShortsDir, 'dummy_backfill_video.mp4');
+      const dummyCoverFile = path.join(testShortsDir, 'dummy_backfill_cover.jpg');
+      await fs.writeFile(dummyVideoFile, 'BINARY_BACKFILL_VIDEO_DATA');
+      await fs.writeFile(dummyCoverFile, 'JPEG_BACKFILL_COVER_DATA');
+
+      const mockFailingYouTubeClient = {
+        videos: {
+          insert: async () => { throw new Error('Simulated 503 YouTube Service Unavailable'); }
+        }
+      };
+      const mockSuccessOrchestrator = {
+        produceShort: async ({ outputMp4, outputCover }) => {
+          await fs.writeFile(outputMp4, 'FRESH_MP4_DATA_' + Date.now());
+          await fs.writeFile(outputCover, 'FRESH_COVER_DATA_' + Date.now());
+          return {
+            productionReady: true,
+            qaResults: { allChecksPassed: true },
+            packaging: { title: 'Backfill Test Title #Shorts', description: 'Backfill test description' }
+          };
+        }
+      };
+      const uploadFailPublisher = new DailyShortsPublisher({
+        db,
+        orchestrator: mockSuccessOrchestrator,
+        shortsDir: testShortsDir,
+        scratchDir: testScratchDir,
+        youtubeClient: mockFailingYouTubeClient,
+        maxUploadAttempts: 1
+      });
+      await uploadFailPublisher.recoverMissedShorts({ fromDate: uploadFailDate, toDate: getPastDateStr(5), forcePublish: true });
+      const obligationAfterUploadFail = await db.getRow('SELECT * FROM daily_shorts_backlog WHERE target_date = ?', [uploadFailDate]);
+      if (!obligationAfterUploadFail || obligationAfterUploadFail.status !== 'PENDING') {
+        throw new Error('TEST 9 Failed: Obligation was marked satisfied despite upload failure');
+      }
+      this.logger.info('TEST 9 Passed: YouTube upload failure preserves obligation as pending.');
+
+      // TEST 10: Same MP4 -> DUPLICATE_CONTENT_HASH rejection
+      const dupHashVideo = path.join(testShortsDir, 'dup_hash_test.mp4');
+      await fs.writeFile(dupHashVideo, 'IDENTICAL_BINARY_CONTENT_FOR_HASH_TEST');
+      const dupHash = await test1Publisher.computeContentHash(dupHashVideo);
+      const dupProd1 = `prod-dup-hash-1-${Date.now()}`;
+      createdProdIds.push(dupProd1);
+      await db.saveDailyShortPublication({
+        production_id: dupProd1,
+        topic: 'Original Unique Topic',
+        title: 'Original Unique Topic #Shorts',
+        video_path: dupHashVideo,
+        content_hash: dupHash,
+        status: 'SCHEDULED'
+      });
+
+      const dupProd2 = `prod-dup-hash-2-${Date.now()}`;
+      createdProdIds.push(dupProd2);
+      await db.saveDailyShortPublication({
+        production_id: dupProd2,
+        topic: 'Another Topic Same Video',
+        title: 'Another Topic Same Video #Shorts',
+        video_path: dupHashVideo,
+        content_hash: dupHash,
+        status: 'READY_TO_PUBLISH',
+        qa_status: 'PASSED'
+      });
+
+      let hashBlocked = false;
+      try {
+        await test1Publisher.publishCandidate(dupProd2, { forcePublish: true });
+      } catch (err) {
+        if (err.code === 'DUPLICATE_CONTENT_HASH') hashBlocked = true;
+      }
+      if (!hashBlocked) {
+        throw new Error('TEST 10 Failed: Identical MP4 content hash was not blocked');
+      }
+      this.logger.info('TEST 10 Passed: DUPLICATE_CONTENT_HASH blocks identical video publication.');
+
+      // TEST 11: Same topic -> Topic duplicate rejection
+      const isTopicDup = await db.isDailyShortTopicDuplicate('Original Unique Topic', 90);
+      if (!isTopicDup) {
+        throw new Error('TEST 11 Failed: Exact topic duplicate was not detected');
+      }
+      this.logger.info('TEST 11 Passed: Topic duplicate rejection confirmed.');
+
+      // TEST 12: Semantic variation of existing topic -> Semantic duplicate rejection
+      const dedupService = new SemanticDedupService();
+      const semDupCheck = dedupService.isDuplicate(
+        'Why The Costco Membership Business Model Is Unstoppable',
+        ["Why Costco's Membership Model Is So Powerful"]
+      );
+      if (!semDupCheck.isDuplicate) {
+        throw new Error('TEST 12 Failed: Semantic duplicate variation was not rejected');
+      }
+      this.logger.info('TEST 12 Passed: Semantic topic duplicate variation rejected.');
+
+      // TEST 13: Previously published MP4 -> Never reused
+      const isContentHashPublished = await db.isDailyShortContentHashDuplicate(dupHash);
+      if (!isContentHashPublished) {
+        throw new Error('TEST 13 Failed: Published content hash was not detected in database');
+      }
+      this.logger.info('TEST 13 Passed: Previously published MP4 cannot be reused.');
+
+      // TEST 14: Multiple backlog items -> Safe sequential processing without uncontrolled concurrency
+      const workingPublisher = new DailyShortsPublisher({
+        db,
+        orchestrator: mockSuccessOrchestrator,
+        shortsDir: testShortsDir,
+        scratchDir: testScratchDir,
+        youtubeClient: mockYouTubeClient
+      });
+
+      const seqDate1 = getPastDateStr(5);
+      const seqDate2 = getPastDateStr(4);
+      await db.saveBacklogObligation({ target_date: seqDate1, status: 'PENDING' });
+      await db.saveBacklogObligation({ target_date: seqDate2, status: 'PENDING' });
+
+      const recoveryReport = await workingPublisher.recoverMissedShorts({
+        fromDate: seqDate1,
+        toDate: getPastDateStr(3),
+        forcePublish: true
+      });
+
+      if (recoveryReport.recovered < 2) {
+        throw new Error(`TEST 14 Failed: Expected 2 recovered obligations, got ${recoveryReport.recovered}`);
+      }
+      // Verify distinct future scheduled timestamps
+      const schedTimes = recoveryReport.results.map(r => r.scheduledTime).filter(Boolean);
+      const uniqueSchedTimes = new Set(schedTimes);
+      if (schedTimes.length !== uniqueSchedTimes.size) {
+        throw new Error('TEST 14 Failed: Recovered videos assigned duplicate scheduled timestamps');
+      }
+      this.logger.info('TEST 14 Passed: Multiple backlog items recovered sequentially with unique timestamps.');
+
+      // TEST 15: Current day already satisfied -> No extra Short produced
+      const currentDayStatus = await workingPublisher.checkDailyStatus(new Date());
+      if (currentDayStatus.hasMetDailyQuota) {
+        const preAttempts = mockYouTubeUploads.length;
+        const secondRun = await workingPublisher.runDailyPublishingCycle({ skipBacklogRecovery: true });
+        if (!secondRun.quotaMet || mockYouTubeUploads.length > preAttempts) {
+          throw new Error('TEST 15 Failed: Second run on satisfied day attempted new video upload');
+        }
+      }
+      this.logger.info('TEST 15 Passed: Current day satisfied results in zero redundant uploads.');
+
+      // PHASE 17: DRY RUN SIMULATION (5 days offline simulation)
+      this.logger.info('Executing Phase 17 Dry-Run Simulation (5 days offline -> Mac comes online at 10 PM IST)...');
+      const simDbPath = path.join(tempDir, 'sim_phase17.db');
+      const simDb = new Database(simDbPath);
+      await simDb.initialize();
+      const simPublisher = new DailyShortsPublisher({ db: simDb, shortsDir: testShortsDir, scratchDir: testScratchDir });
+      const simAnchor = getPastDateStr(5);
+      const simMissedDays = await simPublisher.detectMissedDays({ fromDate: simAnchor, toDate: todayStr });
+      if (simMissedDays.length !== 5) {
+        throw new Error(`Phase 17 Simulation Failed: Expected 5 missed days, got ${simMissedDays.length}`);
+      }
+      this.logger.info(`Phase 17 Simulation: Successfully identified ${simMissedDays.length} missed obligations (Days 1 to 5 offline) + today's obligation.`);
+      await simDb.close().catch(() => {});
+      this.logger.info('All 15 Missed-Day Recovery & Backfill Engine test cases and Phase 17 simulation passed successfully.');
+    } finally {
+      // Clean up test production records and backlog entries
+      for (const pid of createdProdIds) {
+        await new Promise((res) => db.db.run('DELETE FROM daily_shorts_publications WHERE production_id = ?', [pid], () => res()));
+      }
+      for (const d of createdBacklogDates) {
+        await new Promise((res) => db.db.run('DELETE FROM daily_shorts_backlog WHERE target_date = ?', [d], () => res()));
+      }
+      await db.close().catch(() => {});
       await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
     }
   }

@@ -645,7 +645,19 @@ class Database {
       )`,
       `CREATE INDEX IF NOT EXISTS idx_daily_shorts_status ON daily_shorts_publications(status)`,
       `CREATE INDEX IF NOT EXISTS idx_daily_shorts_content_hash ON daily_shorts_publications(content_hash)`,
-      `CREATE INDEX IF NOT EXISTS idx_daily_shorts_scheduled_at ON daily_shorts_publications(scheduled_at)`
+      `CREATE INDEX IF NOT EXISTS idx_daily_shorts_scheduled_at ON daily_shorts_publications(scheduled_at)`,
+      // Phase 8: Autonomous Daily Shorts Backlog & Missed-Day Recovery
+      `CREATE TABLE IF NOT EXISTS daily_shorts_backlog (
+        target_date TEXT PRIMARY KEY,
+        status TEXT NOT NULL DEFAULT 'PENDING',
+        production_id TEXT,
+        scheduled_for TEXT,
+        attempt_count INTEGER DEFAULT 0,
+        last_error TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_backlog_status ON daily_shorts_backlog(status)`
     ];
 
     for (const tableQuery of tables) {
@@ -3333,6 +3345,175 @@ class Database {
       [hash]
     );
     return Boolean(row);
+  }
+
+  /**
+   * Returns the latest calendar date (YYYY-MM-DD) that was satisfied/scheduled/published.
+   */
+  async getLatestCompletedPublishDate() {
+    const pubRow = await this.getRow(
+      `SELECT MAX(COALESCE(strftime('%Y-%m-%d', published_at), strftime('%Y-%m-%d', scheduled_at), strftime('%Y-%m-%d', created_at))) AS latest_date
+       FROM daily_shorts_publications
+       WHERE status IN ('SCHEDULED', 'PUBLISHED')`
+    );
+    const backlogRow = await this.getRow(
+      `SELECT MAX(target_date) AS latest_backlog
+       FROM daily_shorts_backlog
+       WHERE status IN ('SATISFIED', 'RECOVERED')`
+    );
+
+    const dates = [pubRow?.latest_date, backlogRow?.latest_backlog].filter(Boolean);
+    if (dates.length === 0) return null;
+    dates.sort();
+    return dates[dates.length - 1];
+  }
+
+  /**
+   * Audits and identifies all elapsed calendar days between anchor date and yesterday
+   * that lack a completed/scheduled Short. Persists obligations as PENDING in daily_shorts_backlog.
+   */
+  async getMissedPublishingDays(options = {}) {
+    const today = options.toDate ? new Date(options.toDate) : new Date();
+    const todayStr = today.toISOString().slice(0, 10);
+    const lookbackDays = Math.min(Math.max(1, Number(options.lookbackDays || 30)), 90);
+
+    let startStr = options.fromDate ? String(options.fromDate).slice(0, 10) : null;
+    if (!startStr) {
+      const latestSatisfied = await this.getLatestCompletedPublishDate();
+      if (latestSatisfied) {
+        // Day after the last satisfied publishing date
+        const d = new Date(latestSatisfied + 'T00:00:00.000Z');
+        d.setUTCDate(d.getUTCDate() + 1);
+        startStr = d.toISOString().slice(0, 10);
+      } else {
+        // No prior published records: look back lookbackDays or return empty if not desired
+        if (options.defaultToTodayIfNoHistory !== false) {
+          return [];
+        }
+        const d = new Date(today.getTime());
+        d.setUTCDate(d.getUTCDate() - lookbackDays);
+        startStr = d.toISOString().slice(0, 10);
+      }
+    }
+
+    // Never count today or future dates as missed obligations
+    if (startStr >= todayStr) {
+      return [];
+    }
+
+    const curr = new Date(startStr + 'T00:00:00.000Z');
+    const end = new Date(todayStr + 'T00:00:00.000Z');
+
+    while (curr.getTime() < end.getTime()) {
+      const dateStr = curr.toISOString().slice(0, 10);
+
+      // Check if this date is already satisfied in publications
+      const completedOnDate = await this.getAllRows(
+        `SELECT production_id FROM daily_shorts_publications
+         WHERE (strftime('%Y-%m-%d', published_at) = ? OR strftime('%Y-%m-%d', scheduled_at) = ?)
+           AND status IN ('SCHEDULED', 'PUBLISHED') LIMIT 1`,
+        [dateStr, dateStr]
+      );
+
+      const existingBacklog = await this.getRow(
+        'SELECT status FROM daily_shorts_backlog WHERE target_date = ?',
+        [dateStr]
+      );
+
+      if (completedOnDate && completedOnDate.length > 0) {
+        if (!existingBacklog) {
+          await this.saveBacklogObligation({
+            target_date: dateStr,
+            status: 'SATISFIED',
+            production_id: completedOnDate[0].production_id
+          });
+        } else if (existingBacklog.status === 'PENDING') {
+          await this.updateBacklogObligation(dateStr, {
+            status: 'SATISFIED',
+            production_id: completedOnDate[0].production_id
+          });
+        }
+      } else {
+        if (!existingBacklog) {
+          await this.saveBacklogObligation({
+            target_date: dateStr,
+            status: 'PENDING'
+          });
+        }
+      }
+
+      curr.setUTCDate(curr.getUTCDate() + 1);
+    }
+
+    // Return pending obligations that are strictly before today
+    const rows = await this.getAllRows(
+      `SELECT * FROM daily_shorts_backlog
+       WHERE status = 'PENDING' AND target_date < ?
+       ORDER BY target_date ASC`,
+      [todayStr]
+    );
+
+    return rows;
+  }
+
+  async getPendingBacklogObligations(limit = 30) {
+    const todayStr = new Date().toISOString().slice(0, 10);
+    return this.getAllRows(
+      `SELECT * FROM daily_shorts_backlog
+       WHERE status = 'PENDING' AND target_date < ?
+       ORDER BY target_date ASC LIMIT ?`,
+      [todayStr, Number(limit || 30)]
+    );
+  }
+
+  async saveBacklogObligation(record) {
+    if (!record || !record.target_date) return null;
+    await this.executeQuery(
+      `INSERT INTO daily_shorts_backlog (
+        target_date, status, production_id, scheduled_for, attempt_count, last_error, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(target_date) DO UPDATE SET
+        status = COALESCE(excluded.status, daily_shorts_backlog.status),
+        production_id = COALESCE(excluded.production_id, daily_shorts_backlog.production_id),
+        scheduled_for = COALESCE(excluded.scheduled_for, daily_shorts_backlog.scheduled_for),
+        attempt_count = COALESCE(excluded.attempt_count, daily_shorts_backlog.attempt_count),
+        last_error = COALESCE(excluded.last_error, daily_shorts_backlog.last_error),
+        updated_at = CURRENT_TIMESTAMP`,
+      [
+        record.target_date,
+        record.status || 'PENDING',
+        record.production_id || null,
+        record.scheduled_for || null,
+        record.attempt_count || 0,
+        record.last_error || null
+      ]
+    );
+    return this.getRow('SELECT * FROM daily_shorts_backlog WHERE target_date = ?', [record.target_date]);
+  }
+
+  async updateBacklogObligation(targetDate, updates = {}) {
+    if (!targetDate) return null;
+    const allowed = ['status', 'production_id', 'scheduled_for', 'attempt_count', 'last_error'];
+    const fields = [];
+    const values = [];
+
+    for (const key of allowed) {
+      if (updates[key] !== undefined) {
+        fields.push(`${key} = ?`);
+        values.push(updates[key]);
+      }
+    }
+
+    if (fields.length === 0) return null;
+    fields.push('updated_at = CURRENT_TIMESTAMP');
+    values.push(targetDate);
+
+    await this.executeQuery(
+      `UPDATE daily_shorts_backlog SET ${fields.join(', ')} WHERE target_date = ?`,
+      values
+    );
+
+    return this.getRow('SELECT * FROM daily_shorts_backlog WHERE target_date = ?', [targetDate]);
   }
 }
 

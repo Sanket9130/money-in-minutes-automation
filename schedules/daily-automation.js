@@ -23,6 +23,9 @@ class DailyAutomation {
     // Start monitoring loop
     this.startMonitoringLoop();
     
+    // Check for missed days or unfulfilled daily quota on startup
+    this.triggerStartupShortsCheck();
+
     this.logger.success('Daily automation initialized successfully');
     return true;
   }
@@ -135,6 +138,40 @@ class DailyAutomation {
       await this.logAutomationEvent('daily_shorts_publishing', 'error', { error: error.message });
       await this.sendFailureNotification('Daily Shorts Publishing', error);
       throw error;
+    }
+  }
+
+  async triggerStartupShortsCheck() {
+    if (!this.isEnabled || process.env.DAILY_SHORT_ENABLED === 'false') {
+      return;
+    }
+
+    try {
+      this.logger.info('Performing startup shorts obligation and backlog audit...');
+      const { DailyShortsPublisher } = require('../utils/daily-shorts-publisher');
+      const publisher = new DailyShortsPublisher({ db: this.db, logger: this.logger });
+      await publisher.initialize();
+
+      const missed = await publisher.detectMissedDays();
+      const status = await publisher.checkDailyStatus();
+
+      if (missed.length > 0 || !status.hasMetDailyQuota) {
+        this.logger.info(
+          `Startup check: found ${missed.length} missed day(s) and today's quota fulfilled=${status.hasMetDailyQuota}. Triggering autonomous publishing cycle...`
+        );
+        // Run in background without blocking scheduler initialization
+        setTimeout(async () => {
+          try {
+            await this.runDailyShortsPublishing();
+          } catch (err) {
+            this.logger.error('Startup daily shorts recovery encountered an error:', err);
+          }
+        }, 0);
+      } else {
+        this.logger.info('Startup check: Daily quota and backlog already up to date. Standing by for next scheduled run.');
+      }
+    } catch (err) {
+      this.logger.warn(`Startup shorts audit error (non-fatal): ${err.message}`);
     }
   }
 

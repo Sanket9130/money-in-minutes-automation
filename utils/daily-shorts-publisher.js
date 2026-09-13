@@ -138,6 +138,135 @@ class DailyShortsPublisher {
   }
 
   /**
+   * Calculates distinct, sequential future publishing timestamps for daily or backlog items.
+   * Ensures no duplicate scheduled publish timestamps on YouTube.
+   * @param {Date} [targetDate=new Date()]
+   * @param {number} [offsetIndex=0] Sequential offset index for multiple backlog obligations
+   * @param {string} [timeStr] e.g. "17:00"
+   * @returns {string} ISO timestamp
+   */
+  calculateNextAvailablePublishTime(targetDate = new Date(), offsetIndex = 0, timeStr = this.dailyPublishTime) {
+    const [hours, minutes] = timeStr.split(':').map(n => parseInt(n, 10) || 0);
+    const scheduled = new Date(targetDate);
+    scheduled.setUTCHours(hours, minutes, 0, 0);
+
+    const now = new Date();
+    // If target UTC time has already passed today (or is within 15 minutes), advance by at least 1 day
+    if (scheduled.getTime() <= now.getTime() + 15 * 60 * 1000) {
+      scheduled.setUTCDate(scheduled.getUTCDate() + 1);
+    }
+
+    // Advance by offsetIndex days for sequential future scheduling
+    if (offsetIndex > 0) {
+      scheduled.setUTCDate(scheduled.getUTCDate() + offsetIndex);
+    }
+
+    return scheduled.toISOString();
+  }
+
+  /**
+   * Identifies all elapsed publishing days that lack a completed Short.
+   * Persists them in SQLite backlog as PENDING.
+   * @param {Object} [options={}]
+   * @returns {Promise<Array<Object>>} List of pending backlog obligations
+   */
+  async detectMissedDays(options = {}) {
+    await this.initialize();
+    return this.db.getMissedPublishingDays(options);
+  }
+
+  /**
+   * Recovers missed publishing obligations sequentially with genuine new content.
+   * Never reuses old videos. Strictly enforces QA, deduplication, and distinct future scheduling.
+   * @param {Object} [options={}]
+   * @returns {Promise<{ recovered: number, totalMissed: number, results: Array }>}
+   */
+  async recoverMissedShorts(options = {}) {
+    await this.initialize();
+    const pending = await this.detectMissedDays(options);
+
+    if (!pending || pending.length === 0) {
+      this.logger.info('No missed publishing obligations found.');
+      return { recovered: 0, totalMissed: 0, results: [] };
+    }
+
+    this.logger.info(`Detected ${pending.length} missed publishing obligations. Starting sequential recovery...`);
+
+    const results = [];
+    const excludedTopics = [];
+    let recoveredCount = 0;
+
+    // Sequential processing: 1 video at a time
+    for (let i = 0; i < pending.length; i++) {
+      const obligation = pending[i];
+      const targetDate = obligation.target_date;
+      this.logger.info(`\n[Backlog Recovery] Processing missed obligation ${i + 1}/${pending.length} for date: ${targetDate}`);
+
+      try {
+        // 1. Discover genuinely fresh topic
+        const topic = await this.discoverNextTopic(excludedTopics);
+        excludedTopics.push(topic);
+
+        // 2. Generate candidate and run 17-point QA
+        const prodResult = await this.generateCandidate(topic, options);
+        if (!prodResult.success) {
+          const errMessage = prodResult.error || 'Candidate failed 17-point QA verification';
+          await this.db.updateBacklogObligation(targetDate, {
+            attempt_count: (obligation.attempt_count || 0) + 1,
+            last_error: errMessage
+          });
+          results.push({ targetDate, success: false, error: errMessage });
+          this.logger.warn(`[Backlog Recovery] Generation failed for date ${targetDate}. Obligation remains PENDING.`);
+          continue;
+        }
+
+        // 3. Allocate unique future publish timestamp
+        const scheduledTime = this.calculateNextAvailablePublishTime(new Date(), i + 1);
+
+        // 4. Publish / schedule candidate
+        const pubResult = await this.publishCandidate(prodResult.productionId, {
+          ...options,
+          scheduledPublishTime: scheduledTime
+        });
+
+        // 5. Mark obligation as RECOVERED
+        await this.db.updateBacklogObligation(targetDate, {
+          status: 'RECOVERED',
+          production_id: prodResult.productionId,
+          scheduled_for: scheduledTime,
+          last_error: null
+        });
+
+        recoveredCount++;
+        results.push({
+          targetDate,
+          success: true,
+          productionId: prodResult.productionId,
+          topic,
+          scheduledTime,
+          status: pubResult.status
+        });
+
+        this.logger.success(`[Backlog Recovery] Successfully recovered missed obligation for ${targetDate} (Scheduled for: ${scheduledTime})`);
+      } catch (recoveryErr) {
+        this.logger.error(`[Backlog Recovery] Failed to recover missed obligation for ${targetDate}:`, recoveryErr);
+        await this.db.updateBacklogObligation(targetDate, {
+          attempt_count: (obligation.attempt_count || 0) + 1,
+          last_error: recoveryErr.message
+        });
+        results.push({ targetDate, success: false, error: recoveryErr.message });
+        // Obligation remains PENDING in database
+      }
+    }
+
+    return {
+      recovered: recoveredCount,
+      totalMissed: pending.length,
+      results
+    };
+  }
+
+  /**
    * Generates a candidate Short and runs full 17-point QA.
    * Updates database state explicitly across IDEA -> RESEARCHING -> SCRIPTED -> PRODUCING -> QA_PENDING -> READY_TO_PUBLISH or QA_FAILED.
    * @param {string} topic
@@ -335,6 +464,11 @@ class DailyShortsPublisher {
 
       const videoStream = fs.createReadStream(record.video_path);
       const cleanTitle = record.title.includes('#Shorts') ? record.title : `${record.title} #Shorts`;
+      const topicWords = (record.topic || '')
+        .split(/\s+/)
+        .map(w => w.replace(/[^a-zA-Z0-9]/g, ''))
+        .filter(w => w.length > 3 && !['with', 'from', 'this', 'that', 'what', 'when', 'where', 'which', 'about'].includes(w.toLowerCase()));
+      const dynamicTags = Array.from(new Set(['Shorts', 'YouTubeShorts', 'MoneyInMinutes', 'Finance', 'Business', ...topicWords])).slice(0, 15);
 
       const videoUpload = await youtube.videos.insert({
         part: 'snippet,status',
@@ -342,7 +476,7 @@ class DailyShortsPublisher {
           snippet: {
             title: cleanTitle.slice(0, 100),
             description: (record.description || record.title).slice(0, 5000),
-            tags: ['Shorts', 'YouTubeShorts', 'MoneyInMinutes', 'Finance', 'Business'],
+            tags: dynamicTags,
             categoryId: '27', // Education
             defaultLanguage: 'en',
             defaultAudioLanguage: 'en'
@@ -418,8 +552,8 @@ class DailyShortsPublisher {
   }
 
   /**
-   * Executes the full daily publishing cycle with retry guarantees.
-   * Guarantees at least 1 candidate is generated, verified through QA, and scheduled/published.
+   * Executes the full daily publishing cycle with retry guarantees and missed-day recovery.
+   * Guarantees all missed backlog obligations are recovered AND at least 1 Short is scheduled/published for today.
    * @param {Object} [options={}]
    * @returns {Promise<Object>} Execution report
    */
@@ -427,12 +561,24 @@ class DailyShortsPublisher {
     await this.initialize();
     this.logger.info('=== Starting Daily Shorts Autonomous Publishing Cycle ===');
 
+    // 1. Recover any missed publishing obligations from previous days
+    let backlogReport = { recovered: 0, totalMissed: 0, results: [] };
+    if (options.skipBacklogRecovery !== true) {
+      try {
+        backlogReport = await this.recoverMissedShorts(options);
+      } catch (backlogErr) {
+        this.logger.error('Error during backlog recovery:', backlogErr);
+      }
+    }
+
+    // 2. Check today's quota
     const status = await this.checkDailyStatus();
     if (status.hasMetDailyQuota && !options.force) {
       this.logger.info(`Daily publishing quota already met for today (${status.totalCompleted}/${this.dailyMinimum} completed).`);
       return {
         completed: true,
         quotaMet: true,
+        backlogRecovery: backlogReport,
         publishedCount: status.publishedCount,
         scheduledCount: status.scheduledCount,
         records: status.records
@@ -485,6 +631,14 @@ class DailyShortsPublisher {
 
       if (uploadSuccess) {
         cycleSuccess = true;
+        // Record today's obligation as satisfied in backlog
+        const todayStr = new Date().toISOString().slice(0, 10);
+        await this.db.saveBacklogObligation({
+          target_date: todayStr,
+          status: 'SATISFIED',
+          production_id: successfulRecord?.production_id,
+          scheduled_for: successfulRecord?.scheduled_at
+        });
         break;
       } else {
         this.logger.error(`All upload attempts failed for candidate ${prodResult.productionId}. Trying replacement candidate...`);
@@ -493,14 +647,16 @@ class DailyShortsPublisher {
 
     const finalReport = {
       timestamp: new Date().toISOString(),
-      completed: cycleSuccess,
-      quotaMet: cycleSuccess,
+      completed: cycleSuccess || status.hasMetDailyQuota,
+      quotaMet: cycleSuccess || status.hasMetDailyQuota,
+      backlogRecovery: backlogReport,
+      todayCompleted: cycleSuccess,
       attempts: cycleAttempts,
       record: successfulRecord,
       publishingEnabled: process.env.YOUTUBE_PUBLISH_ENABLED === 'true' || options.forcePublish === true
     };
 
-    if (cycleSuccess) {
+    if (finalReport.completed) {
       this.logger.success('=== Daily Shorts Publishing Cycle Finished Successfully ===');
     } else {
       this.logger.error('=== Daily Shorts Publishing Cycle Failed to meet daily quota ===');
