@@ -52,6 +52,12 @@ class YouTubeAutomationAgent {
     this.experiments = null;
     this.discoverability = null;
     this.setupRequired = false;
+    this.isShuttingDown = false;
+    this.shutdownPromise = null;
+    this.server = null;
+    this.signalHandlersRegistered = false;
+    this._sigtermHandler = null;
+    this._sigintHandler = null;
   }
 
   async initialize() {
@@ -235,7 +241,7 @@ class YouTubeAutomationAgent {
       topic: null,
       style: null,
       length: typeof body.length === 'string' ? body.length.toLowerCase() : 'medium',
-      strategyContext: null
+      strategyContext: {}
     };
 
     // JSON has no `undefined`, so clients send `null` to mean "no value provided".
@@ -376,6 +382,18 @@ class YouTubeAutomationAgent {
     this.app.use(express.json({ limit: '1mb' }));
     this.app.use(express.static(path.join(__dirname, 'dashboard')));
 
+    // Reject new requests if application is shutting down
+    this.app.use((req, res, next) => {
+      if (this.isShuttingDown && req.path !== '/health') {
+        res.setHeader('Connection', 'close');
+        return res.status(503).json({
+          success: false,
+          error: 'Service is shutting down'
+        });
+      }
+      next();
+    });
+
     if (!process.env.API_KEY) {
       this.logger.warn('API_KEY is not set; mutating API routes are unprotected');
     }
@@ -388,7 +406,8 @@ class YouTubeAutomationAgent {
     // Health check
     this.app.get('/health', (req, res) => {
       res.json({
-        status: this.setupRequired ? 'setup_required' : 'healthy',
+        status: this.isShuttingDown ? 'shutting_down' : (this.setupRequired ? 'setup_required' : 'healthy'),
+        shuttingDown: Boolean(this.isShuttingDown),
         initialized: this.isInitialized,
         setupRequired: this.setupRequired,
         agents: Object.keys(this.agents),
@@ -408,8 +427,8 @@ class YouTubeAutomationAgent {
           return res.status(validation.status).json({ success: false, error: validation.error });
         }
 
-        const { topic, style, length } = validation.value;
-        const result = await this.startGenerationJob({ topic, style, length, source: 'manual' });
+        const { topic, style, length, strategyContext } = validation.value;
+        const result = await this.startGenerationJob({ topic, style, length, strategyContext, source: 'manual' });
         res.status(202).json({ success: true, result });
       } catch (error) {
         res.status(error.status || 500).json({ success: false, error: error.message });
@@ -1202,7 +1221,7 @@ class YouTubeAutomationAgent {
       }
       const provider = req.body?.video_provider;
       if (provider !== undefined) {
-        const supported = ['slideshow', 'auto', 'seedance', 'minimax_h3', 'google_omni', 'kling', 'wan'];
+        const supported = ['slideshow', 'auto', 'seedance', 'minimax_h3', 'google_omni', 'google_veo', 'kling', 'wan'];
         if (!supported.includes(provider)) return res.status(400).json({ error: 'Unsupported video provider' });
         await this.db.setSetting('video_provider', provider);
       }
@@ -1231,6 +1250,11 @@ class YouTubeAutomationAgent {
   }
 
   async startGenerationJob(input = {}) {
+    if (this.isShuttingDown) {
+      const error = new Error('Service is shutting down');
+      error.status = 503;
+      throw error;
+    }
     if (this.setupRequired || !this.agents.strategy) {
       const error = new Error('Finish setup with npm run walkthrough before generating content');
       error.status = 503;
@@ -1266,6 +1290,11 @@ class YouTubeAutomationAgent {
   }
 
   async resumeGenerationJob(jobId, options = {}) {
+    if (this.isShuttingDown) {
+      const error = new Error('Service is shutting down');
+      error.status = 503;
+      throw error;
+    }
     if (this.setupRequired || !this.agents.strategy) {
       const error = new Error('Finish setup with npm run walkthrough before resuming content generation');
       error.status = 503;
@@ -1339,6 +1368,11 @@ class YouTubeAutomationAgent {
   }
 
   async queueScheduledContent(input = {}) {
+    if (this.isShuttingDown) {
+      const error = new Error('Service is shutting down');
+      error.status = 503;
+      throw error;
+    }
     const strategy = await this.db.getChannelStrategy();
     if (strategy?.status === 'active') {
       const weeklyOutput = await this.db.getRow(
@@ -1360,7 +1394,7 @@ class YouTubeAutomationAgent {
       await this.db.updateGenerationJob(jobId, { status: 'running', progress: 2, error: null, completedAt: null });
       const result = await this.generateContent(input.topic, input.style, input.length, {
         jobId,
-        strategyContext: input.strategyContext
+        strategyContext: input.strategyContext || {}
       });
       await this.db.updateGenerationJob(jobId, {
         status: 'completed',
@@ -1375,28 +1409,37 @@ class YouTubeAutomationAgent {
       return result;
     } catch (error) {
       const cancelled = error.code === 'JOB_CANCELLED';
+      const interrupted = this.isShuttingDown || error.code === 'JOB_INTERRUPTED' || error.message?.includes('shutting down');
       const current = await this.db.getGenerationJob(jobId);
       const failedStage = current?.stage || 'starting';
+      const finalStatus = cancelled ? 'cancelled' : (interrupted ? 'interrupted' : 'failed');
       await this.db.updateGenerationJob(jobId, {
-        status: cancelled ? 'cancelled' : 'failed',
+        status: finalStatus,
         stage: failedStage,
         error: error.message,
-        details: { failedStage },
+        details: { failedStage, interrupted: Boolean(interrupted) },
         completedAt: new Date().toISOString()
       });
-      await this.operator.notify({
-        type: cancelled ? 'generation_cancelled' : 'generation_failure',
-        level: cancelled ? 'warning' : 'error',
-        title: cancelled ? 'Generation cancelled' : 'Generation failed',
-        message: error.message,
-        data: { jobId }
-      });
+      if (!interrupted) {
+        await this.operator.notify({
+          type: cancelled ? 'generation_cancelled' : 'generation_failure',
+          level: cancelled ? 'warning' : 'error',
+          title: cancelled ? 'Generation cancelled' : 'Generation failed',
+          message: error.message,
+          data: { jobId }
+        });
+      }
       throw error;
     }
   }
 
   async updateJobStage(jobId, stage, progress, details = {}) {
     if (!jobId) return;
+    if (this.isShuttingDown) {
+      const error = new Error('Generation interrupted by application shutdown');
+      error.code = 'JOB_INTERRUPTED';
+      throw error;
+    }
     const job = await this.db.getGenerationJob(jobId);
     if (job?.cancelRequested) {
       const error = new Error(job.details?.cancelReason || 'Generation cancelled by operator');
@@ -1408,7 +1451,11 @@ class YouTubeAutomationAgent {
 
   async generateContent(topic = null, style = null, length = 'medium', options = {}) {
     this.logger.info('Starting content generation pipeline...');
-    const { jobId = null, strategyContext = {} } = options;
+    const { jobId = null } = options;
+    const strategyContext =
+      options.strategyContext && typeof options.strategyContext === 'object'
+        ? options.strategyContext
+        : {};
     const profile = await this.db.getChannelProfile() || {};
     const lengthLabels = { short: '2-4 minutes', medium: '8-12 minutes', long: '15-20 minutes' };
 
@@ -1435,6 +1482,15 @@ class YouTubeAutomationAgent {
       generated.researchSources = Array.isArray(strategyContext.researchSources)
         ? strategyContext.researchSources
         : [];
+
+      // A4.1 Content DNA Feedback Loop: attach learned Content DNA profile if available
+      try {
+        const learningSummary = await this.agents.analytics?.getLearningSummary?.().catch(() => null);
+        generated.contentDNA = strategyContext.contentDNA || learningSummary?.contentDNA || null;
+      } catch (_err) {
+        generated.contentDNA = strategyContext.contentDNA || null;
+      }
+
       return generated;
     });
     this.logger.info(`Strategy generated: ${strategy.topic}`);
@@ -1789,6 +1845,161 @@ class YouTubeAutomationAgent {
     return { productionId, reviewStatus: 'approved', qualityScore: quality.score, schedule: scheduleEntry };
   }
 
+  registerSignalHandlers() {
+    if (this.signalHandlersRegistered) return;
+    this.signalHandlersRegistered = true;
+
+    this._sigtermHandler = () => {
+      this.logger.info('Received SIGTERM signal. Initiating graceful shutdown...');
+      this.gracefulShutdown({ signal: 'SIGTERM' }).catch(err => {
+        this.logger.error('Error during SIGTERM graceful shutdown:', err);
+      });
+    };
+
+    this._sigintHandler = () => {
+      this.logger.info('Received SIGINT signal. Initiating graceful shutdown...');
+      this.gracefulShutdown({ signal: 'SIGINT' }).catch(err => {
+        this.logger.error('Error during SIGINT graceful shutdown:', err);
+      });
+    };
+
+    process.on('SIGTERM', this._sigtermHandler);
+    process.on('SIGINT', this._sigintHandler);
+  }
+
+  unregisterSignalHandlers() {
+    if (!this.signalHandlersRegistered) return;
+    if (this._sigtermHandler) {
+      process.removeListener('SIGTERM', this._sigtermHandler);
+      this._sigtermHandler = null;
+    }
+    if (this._sigintHandler) {
+      process.removeListener('SIGINT', this._sigintHandler);
+      this._sigintHandler = null;
+    }
+    this.signalHandlersRegistered = false;
+  }
+
+  async gracefulShutdown(options = {}) {
+    if (this.shutdownPromise) {
+      return this.shutdownPromise;
+    }
+
+    this.isShuttingDown = true;
+    const signal = options.signal || 'MANUAL';
+    const timeoutMs = options.timeoutMs || parseInt(process.env.SHUTDOWN_TIMEOUT_MS || '10000', 10);
+    this.logger.info(`Starting graceful shutdown (${signal}). Timeout: ${timeoutMs}ms...`);
+
+    const cleanup = async () => {
+      const results = {
+        schedulerStopped: false,
+        autonomousStopped: false,
+        interruptedJobsMarked: false,
+        serverClosed: false,
+        dbClosed: false,
+        errors: []
+      };
+
+      // 1. Stop scheduled work
+      if (this.scheduler) {
+        try {
+          await this.scheduler.stopAutomation();
+          results.schedulerStopped = true;
+          this.logger.info('Automation scheduler stopped cleanly');
+        } catch (err) {
+          this.logger.error('Error stopping automation scheduler:', err);
+          results.errors.push({ step: 'scheduler', error: err.message });
+        }
+      }
+
+      // 2. Stop autonomous operator runs
+      if (this.autonomous) {
+        try {
+          await this.autonomous.stop();
+          results.autonomousStopped = true;
+          this.logger.info('Autonomous channel operator stopped cleanly');
+        } catch (err) {
+          this.logger.error('Error stopping autonomous operator:', err);
+          results.errors.push({ step: 'autonomous', error: err.message });
+        }
+      }
+
+      // 3. Mark active jobs/runs as interrupted in database
+      if (this.db) {
+        try {
+          await this.db.markInterruptedJobs('Process shutdown interrupted active work');
+          results.interruptedJobsMarked = true;
+          this.logger.info('Active jobs marked as interrupted in database');
+        } catch (err) {
+          this.logger.error('Error marking interrupted jobs:', err);
+          results.errors.push({ step: 'markInterruptedJobs', error: err.message });
+        }
+      }
+
+      // 4. Close HTTP server
+      if (this.server) {
+        try {
+          await new Promise((resolve) => {
+            this.server.close((err) => {
+              if (err) {
+                this.logger.warn('Server close notice:', err.message);
+              }
+              resolve();
+            });
+            if (typeof this.server.closeIdleConnections === 'function') {
+              this.server.closeIdleConnections();
+            }
+          });
+          results.serverClosed = true;
+          this.server = null;
+          this.logger.info('HTTP server closed');
+        } catch (err) {
+          this.logger.error('Error closing HTTP server:', err);
+          results.errors.push({ step: 'server', error: err.message });
+        }
+      }
+
+      // 5. Close database connection
+      if (this.db) {
+        try {
+          await this.db.close();
+          results.dbClosed = true;
+          this.logger.info('Database closed cleanly');
+        } catch (err) {
+          this.logger.error('Error closing database:', err);
+          results.errors.push({ step: 'db', error: err.message });
+        }
+      }
+
+      this.unregisterSignalHandlers();
+      return results;
+    };
+
+    let timer;
+    const timeoutPromise = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        this.logger.warn(`Graceful shutdown timed out after ${timeoutMs}ms`);
+        resolve({ timedOut: true });
+      }, timeoutMs);
+    });
+
+    this.shutdownPromise = Promise.race([
+      cleanup(),
+      timeoutPromise
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+
+    const outcome = await this.shutdownPromise;
+    this.logger.info('Graceful shutdown completed');
+
+    if (options.exit !== false && process.env.NODE_ENV !== 'test' && !process.env.SUPPRESS_SHUTDOWN_EXIT) {
+      process.exit(0);
+    }
+
+    return outcome;
+  }
+
   async start() {
     const initialized = await this.initialize();
     
@@ -1797,20 +2008,26 @@ class YouTubeAutomationAgent {
       process.exit(1);
     }
     
+    this.registerSignalHandlers();
+
     const PORT = process.env.PORT || 3456;
-    this.app.listen(PORT, () => {
-      console.log(chalk.green(`\n✅ YouTube Automation Agent running on port ${PORT}`));
-      console.log(chalk.gray('─'.repeat(50)));
-      console.log(chalk.white('📊 Dashboard: ') + chalk.cyan(`http://localhost:${PORT}`));
-      console.log(chalk.white('🔧 API Health: ') + chalk.cyan(`http://localhost:${PORT}/health`));
-      console.log(chalk.white('📅 Schedule: ') + chalk.cyan(`http://localhost:${PORT}/schedule`));
-      console.log(chalk.white('📈 Analytics: ') + chalk.cyan(`http://localhost:${PORT}/analytics`));
-      console.log(chalk.gray('─'.repeat(50)));
-      if (this.setupRequired) {
-        console.log(chalk.yellow('\n⚙️  Setup is required. The dashboard is available; run npm run walkthrough to enable generation.'));
-      } else {
-        console.log(chalk.yellow('\n🤖 Automation is active. Approved content will be published on schedule.'));
-      }
+    return new Promise((resolve, reject) => {
+      this.server = this.app.listen(PORT, () => {
+        console.log(chalk.green(`\n✅ YouTube Automation Agent running on port ${PORT}`));
+        console.log(chalk.gray('─'.repeat(50)));
+        console.log(chalk.white('📊 Dashboard: ') + chalk.cyan(`http://localhost:${PORT}`));
+        console.log(chalk.white('🔧 API Health: ') + chalk.cyan(`http://localhost:${PORT}/health`));
+        console.log(chalk.white('📅 Schedule: ') + chalk.cyan(`http://localhost:${PORT}/schedule`));
+        console.log(chalk.white('📈 Analytics: ') + chalk.cyan(`http://localhost:${PORT}/analytics`));
+        console.log(chalk.gray('─'.repeat(50)));
+        if (this.setupRequired) {
+          console.log(chalk.yellow('\n⚙️  Setup is required. The dashboard is available; run npm run walkthrough to enable generation.'));
+        } else {
+          console.log(chalk.yellow('\n🤖 Automation is active. Approved content will be published on schedule.'));
+        }
+        resolve(this.server);
+      });
+      this.server.on('error', reject);
     });
   }
 }

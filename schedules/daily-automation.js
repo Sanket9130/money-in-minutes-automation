@@ -100,6 +100,15 @@ class DailyAutomation {
       }, { scheduled: false })
     );
 
+    // Phase 7: Autonomous Daily Shorts Publishing (at 5:00 AM for 18:00 scheduled release)
+    this.scheduledTasks.set('daily-shorts-automation',
+      cron.schedule('0 5 * * *', async () => {
+        if (this.isEnabled && process.env.DAILY_SHORT_ENABLED !== 'false') {
+          await this.runDailyShortsPublishing();
+        }
+      }, { scheduled: false })
+    );
+
     // Start all scheduled tasks
     this.scheduledTasks.forEach((task, name) => {
       task.start();
@@ -107,7 +116,32 @@ class DailyAutomation {
     });
   }
 
+  async runDailyShortsPublishing(options = {}) {
+    try {
+      this.logger.info('Starting daily shorts autonomous publishing cycle...');
+      const { DailyShortsPublisher } = require('../utils/daily-shorts-publisher');
+      const publisher = new DailyShortsPublisher({ db: this.db, logger: this.logger });
+      await publisher.initialize();
+      const result = await publisher.runDailyPublishingCycle(options);
+      await this.logAutomationEvent('daily_shorts_publishing', result.completed ? 'success' : 'failed', {
+        completed: result.completed,
+        productionId: result.record?.production_id,
+        topic: result.record?.topic,
+        status: result.record?.status
+      });
+      return result;
+    } catch (error) {
+      this.logger.error('Daily shorts publishing cycle encountered an unexpected error:', error);
+      await this.logAutomationEvent('daily_shorts_publishing', 'error', { error: error.message });
+      await this.sendFailureNotification('Daily Shorts Publishing', error);
+      throw error;
+    }
+  }
+
   async runDailyContentGeneration() {
+    if (!this.agents?.strategy && !this.generateContent) {
+      return;
+    }
     try {
       this.logger.info('Starting daily content generation...');
       
@@ -238,6 +272,9 @@ class DailyAutomation {
   }
 
   async processPublishQueue() {
+    if (!this.agents?.publishing) {
+      return;
+    }
     try {
       const published = await this.agents.publishing.processPublishQueue();
       
@@ -259,6 +296,7 @@ class DailyAutomation {
   }
 
   async collectDailyAnalytics() {
+    if (!this.agents?.analytics) return;
     try {
       this.logger.info('Starting daily analytics collection...');
       
@@ -332,6 +370,7 @@ class DailyAutomation {
   }
 
   async weeklyStrategyReview() {
+    if (!this.agents?.strategy) return;
     try {
       this.logger.info('Starting weekly strategy review...');
       
@@ -408,12 +447,20 @@ class DailyAutomation {
       
       // Clean old analytics data (older than 90 days)
       await this.cleanOldAnalytics();
+
+      // Clean old experiment samples for terminal experiments (older than 14 days)
+      let experimentSamplesResult = { deletedCount: 0 };
+      if (this.db?.cleanOldExperimentSamples) {
+        experimentSamplesResult = await this.db.cleanOldExperimentSamples(14);
+        this.logger.info(`Terminal experiment sample maintenance: deleted ${experimentSamplesResult.deletedCount} expired samples`);
+      }
       
       this.logger.success('Database maintenance completed');
       
       await this.logAutomationEvent('database_maintenance', 'success', {
         backupPath,
-        stats
+        stats,
+        experimentSamplesCleaned: experimentSamplesResult.deletedCount
       });
 
     } catch (error) {
@@ -508,10 +555,180 @@ class DailyAutomation {
     try {
       await this.cleanDirectoryOldFiles(tempDir, 7);
       await this.cleanDirectoryOldFiles(uploadsDir, 30);
-      this.logger.info('Old files cleaned up');
+      const manifestStats = await this.cleanProductionManifests(14);
+      this.logger.info(`Old files cleaned up (production manifests: ${JSON.stringify(manifestStats)})`);
     } catch (error) {
       this.logger.error('Failed to clean up old files:', error);
     }
+  }
+
+  async cleanProductionManifests(retentionDays = 14, options = {}) {
+    const fs = require('fs').promises;
+    const path = require('path');
+
+    const dryRun = options.dryRun === true;
+    const days = Math.max(14, Number(retentionDays) || 14);
+    const cutoffTime = Date.now() - (days * 24 * 60 * 60 * 1000);
+    const productionDir = options.targetDir || path.join(__dirname, '..', 'data', 'production');
+
+    const stats = {
+      scanned: 0,
+      protected: 0,
+      deleted: 0,
+      skipped: 0,
+      malformed: 0,
+      errors: 0
+    };
+
+    let files;
+    try {
+      files = await fs.readdir(productionDir);
+    } catch (_dirErr) {
+      // Directory might not exist or cannot be read, which is safe to ignore
+      return stats;
+    }
+
+    const finalMediaExtensions = new Set(['.mp4', '.mov', '.mkv', '.webm', '.avi']);
+
+    for (const file of files) {
+      // Safe lifecycle guard: halt if automation stopped or process shutdown initiated
+      if (!this.isEnabled || this.isShuttingDown || process.__youtubeAgentShuttingDown) {
+        this.logger.info('Production manifest lifecycle cleanup halted due to process shutdown');
+        break;
+      }
+
+      stats.scanned++;
+      const filePath = path.join(productionDir, file);
+
+      try {
+        let fileStat;
+        try {
+          fileStat = await fs.stat(filePath);
+        } catch (_statErr) {
+          // File may have been removed concurrently
+          stats.skipped++;
+          continue;
+        }
+
+        if (!fileStat.isFile()) {
+          stats.skipped++;
+          continue;
+        }
+
+        const ext = path.extname(file).toLowerCase();
+
+        // 1. FINAL OUTPUT SAFETY: Never delete final media videos
+        if (finalMediaExtensions.has(ext)) {
+          stats.protected++;
+          continue;
+        }
+
+        // 2. RETENTION CHECK: Must be strictly older than retentionDays
+        if (fileStat.mtime.getTime() >= cutoffTime) {
+          stats.skipped++;
+          continue;
+        }
+
+        // 3. IDENTIFY MANIFEST OR INTERMEDIATE ASSET
+        let productionId = null;
+        let jobId = null;
+        const isJson = ext === '.json';
+
+        if (isJson) {
+          let content;
+          try {
+            content = await fs.readFile(filePath, 'utf8');
+          } catch (readErr) {
+            this.logger.warn(`Failed to read candidate manifest ${file}: ${readErr.message}`);
+            stats.errors++;
+            stats.skipped++;
+            continue;
+          }
+
+          let parsed;
+          try {
+            parsed = JSON.parse(content);
+          } catch (parseErr) {
+            // Malformed manifest: MUST NOT delete (uncertain -> preserve!)
+            this.logger.warn(`Malformed JSON in candidate manifest ${file}: ${parseErr.message}`);
+            stats.malformed++;
+            stats.skipped++;
+            continue;
+          }
+
+          if (parsed && typeof parsed === 'object') {
+            productionId = parsed.productionId || null;
+            jobId = parsed.jobId || null;
+
+            // Check timestamps inside parsed manifest
+            const updatedAt = parsed.updatedAt ? new Date(parsed.updatedAt).getTime() : 0;
+            const createdAt = parsed.createdAt ? new Date(parsed.createdAt).getTime() : 0;
+            if (updatedAt >= cutoffTime || createdAt >= cutoffTime) {
+              stats.skipped++;
+              continue;
+            }
+          }
+        }
+
+        // If productionId wasn't in JSON, try deriving from filename: <productionId>_manifest.json
+        if (!productionId) {
+          const match = file.match(/^(.+)_manifest\.json$/);
+          if (match) {
+            productionId = match[1];
+          }
+        }
+
+        // If neither productionId nor jobId can be determined: uncertain -> preserve!
+        if (!productionId && !jobId) {
+          stats.skipped++;
+          continue;
+        }
+
+        // 4. ACTIVE / RECOVERABLE PROTECTION CHECK
+        let isProtected = true;
+        if (this.db?.isProductionActiveOrRecoverable) {
+          try {
+            isProtected = await this.db.isProductionActiveOrRecoverable(productionId, jobId);
+          } catch (dbErr) {
+            this.logger.warn(`Database lookup error for ${file}: ${dbErr.message}`);
+            stats.errors++;
+            isProtected = true; // Error -> preserve!
+          }
+        }
+
+        if (isProtected) {
+          stats.protected++;
+          continue;
+        }
+
+        // 5. SAFE DELETION
+        if (dryRun) {
+          stats.deleted++;
+        } else {
+          try {
+            await fs.unlink(filePath);
+            stats.deleted++;
+          } catch (unlinkErr) {
+            if (unlinkErr.code !== 'ENOENT') {
+              this.logger.warn(`Failed to delete expired manifest ${file}: ${unlinkErr.message}`);
+              stats.errors++;
+            }
+          }
+        }
+
+      } catch (err) {
+        this.logger.warn(`Unexpected error during cleanup of ${file}: ${err.message}`);
+        stats.errors++;
+        stats.skipped++;
+      }
+    }
+
+    this.logger.info(
+      `Production manifest lifecycle cleanup: scanned=${stats.scanned}, deleted=${stats.deleted}, ` +
+      `protected=${stats.protected}, skipped=${stats.skipped}, malformed=${stats.malformed}, errors=${stats.errors}`
+    );
+
+    return stats;
   }
 
   async cleanDirectoryOldFiles(directory, days) {
@@ -646,16 +863,28 @@ class DailyAutomation {
   }
 
   async stopAutomation() {
+    this.isEnabled = false;
     this.scheduledTasks.forEach((task, name) => {
-      task.stop();
+      try {
+        task.stop();
+        if (typeof task.destroy === 'function') {
+          task.destroy();
+        }
+      } catch (err) {
+        this.logger.warn(`Error stopping scheduled task ${name}: ${err.message}`);
+      }
       this.logger.info(`Stopped scheduled task: ${name}`);
     });
+    this.scheduledTasks.clear();
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
       this.healthCheckInterval = null;
     }
-    this.isEnabled = false;
     this.logger.info('All automation tasks stopped');
+  }
+
+  async destroy() {
+    return this.stopAutomation();
   }
 
   sleep(ms) {
@@ -673,6 +902,78 @@ class DailyAutomation {
       uptime: process.uptime()
     };
   }
+}
+
+if (require.main === module) {
+  require('dotenv').config();
+  const fsSync = require('fs');
+  const pathModule = require('path');
+  const pidDir = pathModule.join(__dirname, '..', 'data');
+  const pidFile = pathModule.join(pidDir, 'scheduler.pid');
+
+  // Ensure data directory exists
+  if (!fsSync.existsSync(pidDir)) {
+    fsSync.mkdirSync(pidDir, { recursive: true });
+  }
+
+  // Check for existing running scheduler
+  if (fsSync.existsSync(pidFile)) {
+    try {
+      const existingPid = parseInt(fsSync.readFileSync(pidFile, 'utf8').trim(), 10);
+      if (existingPid && existingPid !== process.pid) {
+        process.kill(existingPid, 0); // Check if process is alive
+        console.log(`\n⚠️  [DailyAutomation] Another scheduler instance is already running (PID: ${existingPid}).`);
+        console.log('Exiting current invocation to prevent duplicate background runners.\n');
+        process.exit(0);
+      }
+    } catch (_err) {
+      // Process is not alive or stale PID; safe to overwrite
+    }
+  }
+
+  try {
+    fsSync.writeFileSync(pidFile, String(process.pid), 'utf8');
+  } catch (err) {
+    console.warn(`[DailyAutomation] Warning: Could not write PID file: ${err.message}`);
+  }
+
+  const { Database } = require('../database/db');
+  const db = new Database();
+  const automation = new DailyAutomation({}, db);
+
+  const cleanupPid = () => {
+    try {
+      if (fsSync.existsSync(pidFile)) {
+        const storedPid = parseInt(fsSync.readFileSync(pidFile, 'utf8').trim(), 10);
+        if (storedPid === process.pid) {
+          fsSync.unlinkSync(pidFile);
+        }
+      }
+    } catch (_err) {
+      // Ignore error if PID file is already unlinked or inaccessible
+    }
+  };
+
+  (async () => {
+    await db.initialize();
+    await automation.initialize();
+    console.log(`\n📅 Daily Automation Scheduler is running in daemon mode (PID: ${process.pid}, Press Ctrl+C to stop)...\n`);
+
+    const handleShutdown = async () => {
+      console.log('\nShutting down daily automation scheduler...');
+      cleanupPid();
+      await automation.stopAutomation();
+      process.exit(0);
+    };
+
+    process.on('SIGINT', handleShutdown);
+    process.on('SIGTERM', handleShutdown);
+    process.on('exit', cleanupPid);
+  })().catch(err => {
+    cleanupPid();
+    console.error('Scheduler initialization failed:', err);
+    process.exit(1);
+  });
 }
 
 module.exports = { DailyAutomation };

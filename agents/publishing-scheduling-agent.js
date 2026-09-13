@@ -5,6 +5,12 @@ const path = require('path');
 const { Logger } = require('../utils/logger');
 const { assertValidYouTubeMetadata } = require('../utils/youtube-metadata-validator');
 
+const MAX_PUBLISH_ATTEMPTS = 3;
+const RETRY_BACKOFF_MS = {
+  1: 15 * 60 * 1000, // ~15 minutes after attempt 1 failure
+  2: 60 * 60 * 1000  // ~60 minutes after attempt 2 failure
+};
+
 class PublishingSchedulingAgent {
   constructor(db, credentials) {
     this.db = db;
@@ -23,6 +29,10 @@ class PublishingSchedulingAgent {
 
   async setupYouTubeAPI() {
     try {
+      if (typeof this.credentials?.getYouTubeAuth !== 'function') {
+        this.logger.warn('YouTube credentials not configured; skipping YouTube API client initialization');
+        return;
+      }
       const auth = this.credentials.getYouTubeAuth();
       this.youtube = google.youtube({ version: 'v3', auth });
       this.logger.info('YouTube API initialized');
@@ -34,11 +44,29 @@ class PublishingSchedulingAgent {
 
   async loadPublishQueue() {
     try {
+      if (!this.db?.getPublishQueue) return;
       const queue = await this.db.getPublishQueue();
-      this.publishQueue = queue || [];
+      const validStatuses = new Set(['scheduled', 'paused', 'retry_pending', 'reconciliation_required']);
+
+      const existingMap = new Map();
+      for (const entry of this.publishQueue) {
+        if (validStatuses.has(entry.status)) {
+          existingMap.set(entry.id || entry.productionId, entry);
+        }
+      }
+
+      for (const entry of (queue || [])) {
+        if (validStatuses.has(entry.status)) {
+          existingMap.set(entry.id || entry.productionId, entry);
+        }
+      }
+
+      this.publishQueue = Array.from(existingMap.values())
+        .sort((a, b) => new Date(a.publishTime) - new Date(b.publishTime));
+
       this.logger.info(`Loaded ${this.publishQueue.length} items in publish queue`);
     } catch (error) {
-      this.logger.warn('No existing publish queue found');
+      this.logger.warn(`Failed to load publish queue: ${error.message}`);
     }
   }
 
@@ -57,7 +85,7 @@ class PublishingSchedulingAgent {
       this.logger.info(`Scheduling content: ${productionData.id}`);
       const existing = await this.db.getLatestScheduleEntry?.(productionData.id);
       if (existing) {
-        if (['scheduled', 'paused'].includes(existing.status) && !this.publishQueue.some(entry => entry.id === existing.id)) {
+        if (['scheduled', 'paused', 'retry_pending'].includes(existing.status) && !this.publishQueue.some(entry => entry.id === existing.id)) {
           this.publishQueue.push(existing);
           this.publishQueue.sort((a, b) => new Date(a.publishTime) - new Date(b.publishTime));
         }
@@ -99,6 +127,7 @@ class PublishingSchedulingAgent {
   }
 
   async publishContent(contentId) {
+    let uploadAttemptHandled = false;
     try {
       let productionBundle = null;
       if (this.db.getLatestReadinessRun) {
@@ -115,6 +144,12 @@ class PublishingSchedulingAgent {
       }
       if (this.db.getProductionBundle) {
         productionBundle = await this.db.getProductionBundle(contentId);
+        if (productionBundle && productionBundle.review_status && productionBundle.review_status !== 'approved') {
+          const error = new Error('Publishing is blocked: content must pass review and be approved before publishing');
+          error.status = 409;
+          error.code = 'APPROVAL_REQUIRED';
+          throw error;
+        }
         if (productionBundle && !['verified', 'not_required'].includes(productionBundle.provenance?.status || 'not_required')) {
           const error = new Error('Publishing is blocked until every factual claim is supported or explicitly waived');
           error.status = 409;
@@ -135,6 +170,12 @@ class PublishingSchedulingAgent {
         throw new Error(`Content not found in queue: ${contentId}`);
       }
       if (scheduleEntry.status === 'published') return scheduleEntry;
+      if (scheduleEntry.status === 'dead_letter') {
+        const error = new Error('Publishing failed permanently and reached dead-letter status. Manual intervention required.');
+        error.status = 409;
+        error.code = 'DEAD_LETTER_BLOCKED';
+        throw error;
+      }
       if (!await this.isNarrationReady(scheduleEntry.metadata?.audio || productionBundle?.assets?.audio)) {
         const error = new Error('Publishing is blocked because narration is missing or the intentional-silence override is incomplete');
         error.status = 409;
@@ -160,27 +201,43 @@ class PublishingSchedulingAgent {
       try {
         uploadResult = await this.uploadToYouTube(scheduleEntry);
       } catch (error) {
-        if (scheduleEntry.uploadAttempted && this.isUploadOutcomeUnknown(error)) {
-          scheduleEntry.status = 'reconciliation_required';
-          scheduleEntry.error = 'Upload outcome is unknown; verify the YouTube channel before retrying';
-          await this.db.updateScheduleEntry(scheduleEntry);
-          await this.syncShortStatus(scheduleEntry, 'reconciliation_required', scheduleEntry.error);
+        uploadAttemptHandled = true;
+        const classification = this.classifyPublishError(error, scheduleEntry.uploadAttempted);
+        const retryState = this.calculateNextRetry(scheduleEntry, error, classification);
+
+        scheduleEntry.status = retryState.status;
+        scheduleEntry.error = error.message;
+        if (retryState.nextPublishTime) {
+          scheduleEntry.publishTime = retryState.nextPublishTime;
+        }
+        scheduleEntry.metadata = {
+          ...scheduleEntry.metadata,
+          retry: retryState.metadataRetry
+        };
+
+        await this.db.updateScheduleEntry(scheduleEntry);
+        await this.syncShortStatus(scheduleEntry, retryState.status, error.message);
+
+        if (retryState.status === 'dead_letter') {
+          this.publishQueue = this.publishQueue.filter(entry => entry.productionId !== scheduleEntry.productionId);
+        }
+
+        if (classification === 'UNKNOWN_UPLOAD_OUTCOME') {
           error.code = 'UPLOAD_OUTCOME_UNKNOWN';
           error.status = 409;
-        } else {
-          scheduleEntry.status = 'failed';
-          scheduleEntry.error = error.message;
-          await this.db.updateScheduleEntry(scheduleEntry);
-          await this.syncShortStatus(scheduleEntry, 'failed', error.message);
         }
         throw error;
       }
       
-      // Update database
+      // Update database on success
       scheduleEntry.status = 'published';
       scheduleEntry.publishedAt = new Date().toISOString();
       scheduleEntry.youtubeId = uploadResult.id;
       scheduleEntry.youtubeUrl = `https://www.youtube.com/watch?v=${uploadResult.id}`;
+      scheduleEntry.error = null;
+      if (scheduleEntry.metadata?.retry) {
+        scheduleEntry.metadata.retry.nextRetryTime = null;
+      }
       
       await this.db.updateScheduleEntry(scheduleEntry);
       await this.syncShortStatus(scheduleEntry, 'published');
@@ -192,6 +249,27 @@ class PublishingSchedulingAgent {
       return scheduleEntry;
     } catch (error) {
       this.logger.error('Failed to publish content:', error);
+      if (!uploadAttemptHandled) {
+        let entry = this.publishQueue.find(e => e.productionId === contentId || e.id === contentId);
+        if (!entry && this.db?.getLatestScheduleEntry) {
+          entry = await this.db.getLatestScheduleEntry(contentId).catch(() => null);
+        }
+        if (entry && !['published', 'uploading', 'reconciliation_required', 'dead_letter'].includes(entry.status)) {
+          const classification = this.classifyPublishError(error, false);
+          if (classification === 'NON_RETRYABLE' && error.code !== 'READINESS_BLOCKED') {
+            const retryState = this.calculateNextRetry(entry, error, classification);
+            entry.status = retryState.status;
+            entry.error = error.message;
+            entry.metadata = {
+              ...entry.metadata,
+              retry: retryState.metadataRetry
+            };
+            await this.db.updateScheduleEntry?.(entry);
+            await this.syncShortStatus?.(entry, retryState.status, error.message);
+            this.publishQueue = this.publishQueue.filter(e => e.productionId !== entry.productionId);
+          }
+        }
+      }
       throw error;
     }
   }
@@ -269,7 +347,249 @@ class PublishingSchedulingAgent {
 
   isUploadOutcomeUnknown(error) {
     const status = Number(error.status || error.response?.status || 0);
+    const code = String(error.code || '').toUpperCase();
+    if (['ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'ENETRESET', 'ESOCKETTIMEDOUT'].includes(code)) return true;
     return !status || status >= 500;
+  }
+
+  classifyPublishError(error, uploadAttempted = false) {
+    if (!error) return 'NON_RETRYABLE';
+
+    // Unknown outcome check: if upload was attempted and status >= 500 or connection broke
+    if (uploadAttempted && this.isUploadOutcomeUnknown(error)) {
+      return 'UNKNOWN_UPLOAD_OUTCOME';
+    }
+
+    const code = String(error.code || '').toUpperCase();
+    const status = Number(error.status || error.statusCode || error.response?.status || 0);
+    const message = String(error.message || '').toLowerCase();
+
+    // Non-retryable safety gates and preconditions
+    if (['READINESS_BLOCKED', 'PROVENANCE_BLOCKED', 'NARRATION_REQUIRED', 'APPROVAL_REQUIRED', 'DEAD_LETTER_BLOCKED', 'PACKAGING_INVALID', 'PACKAGING_VIDEO_NOT_FOUND'].includes(code)) {
+      return 'NON_RETRYABLE';
+    }
+    if (message.includes('video file not found') || message.includes('placeholder asset') || message.includes('must pass review') || message.includes('approved before publishing')) {
+      return 'NON_RETRYABLE';
+    }
+    if (status === 400 || status === 404) {
+      return 'NON_RETRYABLE';
+    }
+
+    // YouTube 403 checks
+    if (status === 403) {
+      if (message.includes('quotaexceeded') || message.includes('uploadlimitexceeded') || message.includes('dailylimitexceeded')) {
+        return 'TRANSIENT';
+      }
+      return 'NON_RETRYABLE'; // Permissions, account suspension, terms violation
+    }
+
+    if (message.includes('invalid_grant') || message.includes('unauthorized_client')) {
+      return 'NON_RETRYABLE';
+    }
+
+    // Transient rate limit or temporary token issues
+    if (status === 429 || status === 401) {
+      return 'TRANSIENT';
+    }
+
+    // Pre-upload network errors
+    if (['ECONNREFUSED', 'EAI_AGAIN', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET'].includes(code)) {
+      return uploadAttempted ? 'UNKNOWN_UPLOAD_OUTCOME' : 'TRANSIENT';
+    }
+
+    return 'NON_RETRYABLE';
+  }
+
+  calculateNextRetry(entry, error, classification = null) {
+    const errorType = classification || this.classifyPublishError(error, entry?.uploadAttempted);
+    const previousRetry = entry.metadata?.retry || {};
+    const attemptCount = (previousRetry.attemptCount || 0) + 1;
+    const now = new Date();
+
+    if (errorType === 'NON_RETRYABLE') {
+      return {
+        status: 'dead_letter',
+        nextPublishTime: null,
+        metadataRetry: {
+          attemptCount,
+          maxAttempts: MAX_PUBLISH_ATTEMPTS,
+          lastAttemptAt: now.toISOString(),
+          nextRetryTime: null,
+          failureCategory: 'non_retryable',
+          lastError: error?.message || 'Non-retryable failure',
+          reconciliationStatus: previousRetry.reconciliationStatus || 'none'
+        }
+      };
+    }
+
+    if (errorType === 'UNKNOWN_UPLOAD_OUTCOME') {
+      return {
+        status: 'reconciliation_required',
+        nextPublishTime: null,
+        metadataRetry: {
+          attemptCount,
+          maxAttempts: MAX_PUBLISH_ATTEMPTS,
+          lastAttemptAt: now.toISOString(),
+          nextRetryTime: null,
+          failureCategory: 'unknown_outcome',
+          lastError: error?.message || 'Unknown upload outcome',
+          reconciliationStatus: 'pending'
+        }
+      };
+    }
+
+    // Transient failure: check if attempt count reached or exceeded MAX_PUBLISH_ATTEMPTS
+    if (attemptCount >= MAX_PUBLISH_ATTEMPTS) {
+      return {
+        status: 'dead_letter',
+        nextPublishTime: null,
+        metadataRetry: {
+          attemptCount,
+          maxAttempts: MAX_PUBLISH_ATTEMPTS,
+          lastAttemptAt: now.toISOString(),
+          nextRetryTime: null,
+          failureCategory: 'transient',
+          lastError: error?.message || 'Max publish attempts reached',
+          reconciliationStatus: previousRetry.reconciliationStatus || 'none'
+        }
+      };
+    }
+
+    // Calculate backoff: attempt 1 -> 15m, attempt 2 -> 60m
+    const delayMs = RETRY_BACKOFF_MS[attemptCount] || (15 * 60 * 1000);
+    const nextRetryDate = new Date(now.getTime() + delayMs);
+
+    return {
+      status: 'retry_pending',
+      nextPublishTime: nextRetryDate.toISOString(),
+      metadataRetry: {
+        attemptCount,
+        maxAttempts: MAX_PUBLISH_ATTEMPTS,
+        lastAttemptAt: now.toISOString(),
+        nextRetryTime: nextRetryDate.toISOString(),
+        failureCategory: 'transient',
+        lastError: error?.message || 'Transient error',
+        reconciliationStatus: previousRetry.reconciliationStatus || 'none'
+      }
+    };
+  }
+
+  async reconcileChannelUpload(scheduleEntry) {
+    if (!scheduleEntry) return null;
+
+    if (scheduleEntry.youtubeId) {
+      return this.reconcileUploadedVideo(scheduleEntry);
+    }
+
+    if (!this.youtube) {
+      const error = new Error('YouTube API client is not initialized for channel reconciliation');
+      error.code = 'YOUTUBE_API_UNAVAILABLE';
+      throw error;
+    }
+
+    this.logger.info(`Starting channel upload reconciliation for: ${scheduleEntry.title}`);
+
+    try {
+      let recentVideos = [];
+
+      let uploadsPlaylistId = null;
+      if (this.youtube.channels?.list) {
+        const channelRes = await this.youtube.channels.list({
+          part: 'contentDetails',
+          mine: true
+        });
+        uploadsPlaylistId = channelRes.data?.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
+      }
+
+      if (uploadsPlaylistId && this.youtube.playlistItems?.list) {
+        const playlistRes = await this.youtube.playlistItems.list({
+          part: 'snippet,contentDetails',
+          playlistId: uploadsPlaylistId,
+          maxResults: 15
+        });
+        recentVideos = (playlistRes.data?.items || []).map(item => ({
+          videoId: item.contentDetails?.videoId || item.snippet?.resourceId?.videoId,
+          title: item.snippet?.title || '',
+          publishedAt: item.snippet?.publishedAt || item.contentDetails?.videoPublishedAt
+        }));
+      } else if (this.youtube.search?.list) {
+        const searchRes = await this.youtube.search.list({
+          part: 'snippet',
+          forMine: true,
+          type: 'video',
+          maxResults: 15
+        });
+        recentVideos = (searchRes.data?.items || []).map(item => ({
+          videoId: item.id?.videoId || item.id,
+          title: item.snippet?.title || '',
+          publishedAt: item.snippet?.publishedAt
+        }));
+      } else {
+        throw new Error('YouTube channel uploads playlist and search API are unavailable for reconciliation');
+      }
+
+      const targetTitle = String(scheduleEntry.title || scheduleEntry.metadata?.seo?.title || '').trim().toLowerCase();
+      const match = recentVideos.find(v => v.videoId && String(v.title || '').trim().toLowerCase() === targetTitle);
+
+      if (match) {
+        this.logger.success(`Reconciliation matched video on YouTube: ID ${match.videoId} (${match.title})`);
+        scheduleEntry.youtubeId = match.videoId;
+        scheduleEntry.youtubeUrl = `https://www.youtube.com/watch?v=${match.videoId}`;
+        scheduleEntry.status = 'published';
+        scheduleEntry.publishedAt = match.publishedAt || new Date().toISOString();
+        scheduleEntry.error = null;
+        scheduleEntry.metadata = {
+          ...scheduleEntry.metadata,
+          retry: {
+            ...(scheduleEntry.metadata?.retry || {}),
+            reconciliationStatus: 'reconciled_found',
+            lastAttemptAt: new Date().toISOString(),
+            nextRetryTime: null
+          }
+        };
+
+        await this.db.updateScheduleEntry?.(scheduleEntry);
+        await this.syncShortStatus?.(scheduleEntry, 'published');
+        this.publishQueue = this.publishQueue.filter(entry => entry.productionId !== scheduleEntry.productionId);
+        return scheduleEntry;
+      }
+
+      this.logger.info(`Reconciliation confirmed video "${scheduleEntry.title}" is NOT on channel. Transitioning to retry_pending.`);
+      scheduleEntry.uploadAttempted = false;
+      const retryState = this.calculateNextRetry(
+        scheduleEntry,
+        new Error('Previous upload attempt was not found on channel; safe to retry'),
+        'TRANSIENT'
+      );
+
+      scheduleEntry.status = retryState.status;
+      scheduleEntry.publishTime = retryState.nextPublishTime || scheduleEntry.publishTime;
+      scheduleEntry.metadata = {
+        ...scheduleEntry.metadata,
+        retry: {
+          ...retryState.metadataRetry,
+          reconciliationStatus: 'reconciled_not_found'
+        }
+      };
+
+      await this.db.updateScheduleEntry?.(scheduleEntry);
+      await this.syncShortStatus?.(scheduleEntry, retryState.status);
+      return scheduleEntry;
+
+    } catch (error) {
+      this.logger.error(`Channel reconciliation API failed for ${scheduleEntry.title}: ${error.message}`);
+      scheduleEntry.status = 'reconciliation_required';
+      scheduleEntry.metadata = {
+        ...scheduleEntry.metadata,
+        retry: {
+          ...(scheduleEntry.metadata?.retry || {}),
+          reconciliationStatus: 'reconciliation_failed',
+          lastError: error.message
+        }
+      };
+      await this.db.updateScheduleEntry?.(scheduleEntry);
+      throw error;
+    }
   }
 
   async reconcileUploadedVideo(scheduleEntry) {
@@ -413,15 +733,29 @@ class PublishingSchedulingAgent {
   }
 
   async processPublishQueue() {
+    await this.loadPublishQueue();
     const now = new Date();
-    const scheduled = this.publishQueue
-      .filter(entry => entry.status === 'scheduled')
+
+    // 1. Process any entries needing reconciliation first
+    const reconciliationItems = this.publishQueue.filter(entry => entry.status === 'reconciliation_required');
+    for (const entry of reconciliationItems) {
+      try {
+        await this.reconcileChannelUpload(entry);
+      } catch (recError) {
+        this.logger.warn(`Skipping immediate retry for ${entry.title}; awaiting channel reconciliation: ${recError.message}`);
+      }
+    }
+
+    // 2. Filter ready items: scheduled or retry_pending whose publishTime is due
+    const activeQueue = this.publishQueue
+      .filter(entry => ['scheduled', 'retry_pending'].includes(entry.status))
       .sort((a, b) => new Date(a.publishTime) - new Date(b.publishTime));
-    const readyToPublish = scheduled.filter(entry => new Date(entry.publishTime) <= now);
+
+    const readyToPublish = activeQueue.filter(entry => new Date(entry.publishTime) <= now);
 
     if (readyToPublish.length === 0) {
-      if (scheduled.length > 0) {
-        this.logger.info(`Publish queue: ${scheduled.length} item(s) waiting, next publish at ${scheduled[0].publishTime}`);
+      if (activeQueue.length > 0) {
+        this.logger.info(`Publish queue: ${activeQueue.length} item(s) waiting, next publish at ${activeQueue[0].publishTime}`);
       } else {
         this.logger.info('Publish queue is empty — nothing scheduled yet.');
       }
@@ -440,15 +774,9 @@ class PublishingSchedulingAgent {
           continue;
         }
         this.logger.error(`Failed to auto-publish ${entry.title}:`, error);
-        // Mark as failed but don't stop processing other items
-        if (error.code !== 'UPLOAD_OUTCOME_UNKNOWN') {
-          entry.status = 'failed';
-          entry.error = error.message;
-          await this.db.updateScheduleEntry(entry);
-        }
       }
     }
-    
+
     return readyToPublish.length;
   }
 
@@ -563,6 +891,9 @@ class PublishingSchedulingAgent {
       queueStatus: {
         total: this.publishQueue.length,
         scheduled: this.publishQueue.filter(e => e.status === 'scheduled').length,
+        retryPending: this.publishQueue.filter(e => e.status === 'retry_pending').length,
+        reconciliationRequired: this.publishQueue.filter(e => e.status === 'reconciliation_required').length,
+        deadLetter: this.publishQueue.filter(e => e.status === 'dead_letter').length,
         published: this.publishQueue.filter(e => e.status === 'published').length,
         failed: this.publishQueue.filter(e => e.status === 'failed').length
       },
@@ -685,4 +1016,4 @@ class PublishingSchedulingAgent {
   }
 }
 
-module.exports = { PublishingSchedulingAgent };
+module.exports = { PublishingSchedulingAgent, MAX_PUBLISH_ATTEMPTS, RETRY_BACKOFF_MS };

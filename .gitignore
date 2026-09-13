@@ -72,10 +72,15 @@ build/
 !examples/*.jpg
 !assets/youtube-automation-agent.jpg
 
-# Backup files
+# Backup and scratch files
 *.backup
+*.backup*
+*backup*
+*.phase5a-backup
 *.bak
 backup/
+scratch/
+liveportrait/
 
 # Cache
 .cache/
@@ -87,6 +92,11 @@ data/captions/
 data/scripts/
 data/videos/
 data/thumbnails/
+data/production/
+data/shorts/
+data/broll/
+data/*.pid
+data/thumbnail-templates/
 
 # Claude worktrees
 .claude/worktrees/

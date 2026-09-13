@@ -496,7 +496,7 @@ class AIVideoGenerator {
     return outputPath;
   }
 
-  async generateHybridVideo(clips, visualAssets, audioPath, outputPath, totalDuration) {
+  async generateHybridVideo(clips, visualAssets, audioPath, outputPath, totalDuration, options = {}) {
     if (!(await checkFFmpeg())) throw new Error(ffmpegInstallHint());
     const validImages = await this.filterLocalImageAssets(visualAssets);
     const segments = clips.map(clip => ({ type: 'video', path: clip.path, duration: clip.duration }));
@@ -509,20 +509,23 @@ class AIVideoGenerator {
     if (!segments.length) throw new Error('No usable provider clips or still images were generated');
 
     const visualPath = outputPath.replace(/\.mp4$/i, '_hybrid_visual.mp4');
-    await this.renderMediaTimeline(segments, visualPath);
+    await this.renderMediaTimeline(segments, visualPath, options);
     await this.addAudioToVideo(visualPath, audioPath, outputPath, { loopVideo: true });
     await fs.unlink(visualPath).catch(() => {});
     return outputPath;
   }
 
-  async renderMediaTimeline(segments, outputPath) {
+  async renderMediaTimeline(segments, outputPath, options = {}) {
+    const isPortrait = options.aspectRatio === '9:16' || (Number(options.width) === 1080 && Number(options.height) === 1920);
+    const targetW = Number(options.width || (isPortrait ? 1080 : 1920));
+    const targetH = Number(options.height || (isPortrait ? 1920 : 1080));
     const args = ['-y'];
     for (const segment of segments) {
       if (segment.type === 'image') args.push('-loop', '1', '-t', Number(segment.duration).toFixed(2), '-framerate', '30', '-i', segment.path);
       else args.push('-stream_loop', '-1', '-i', segment.path);
     }
     const filters = segments.map((segment, index) =>
-      `[${index}:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p,trim=duration=${Number(segment.duration).toFixed(2)},setpts=PTS-STARTPTS[v${index}]`
+      `[${index}:v]scale=${targetW}:${targetH}:force_original_aspect_ratio=decrease,pad=${targetW}:${targetH}:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p,trim=duration=${Number(segment.duration).toFixed(2)},setpts=PTS-STARTPTS[v${index}]`
     );
     filters.push(`${segments.map((_, index) => `[v${index}]`).join('')}concat=n=${segments.length}:v=1:a=0[vout]`);
     args.push('-filter_complex', filters.join(';'), '-map', '[vout]', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', outputPath);
@@ -575,7 +578,7 @@ class AIVideoGenerator {
     return outputPath;
   }
 
-  async generateSlideshowVideo(script, visualAssets, audioPath, outputPath) {
+  async generateSlideshowVideo(script, visualAssets, audioPath, outputPath, options = {}) {
     this.logger.info('Creating slideshow video...');
 
     if (!(await checkFFmpeg())) {
@@ -587,8 +590,11 @@ class AIVideoGenerator {
     const slidesDir = path.join(path.dirname(outputPath), 'slides');
 
     try {
+      const isPortrait = options.aspectRatio === '9:16' || (Number(options.width) === 1080 && Number(options.height) === 1920);
+      const targetW = Number(options.width || (isPortrait ? 1080 : 1920));
+      const targetH = Number(options.height || (isPortrait ? 1920 : 1080));
       const page = await browser.newPage();
-      await page.setViewportSize({ width: 1920, height: 1080 });
+      await page.setViewportSize({ width: targetW, height: targetH });
 
       // Create HTML for slideshow (only real image files can be embedded)
       const imageAssets = await this.filterImageAssets(visualAssets);

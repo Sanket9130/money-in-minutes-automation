@@ -1,7 +1,7 @@
 const { Logger } = require('../utils/logger');
 const { AITextService } = require('../utils/ai-text-service');
 const { SemanticDedupService } = require('../utils/semantic-dedup-service');
-const { TrendingTopicDiscovery } = require('../utils/trending-topic-discovery');
+const { TrendingTopicDiscovery, TopicPerformanceScorer } = require('../utils/trending-topic-discovery');
 
 class ContentStrategyAgent {
   constructor(db, credentials, options = {}) {
@@ -14,6 +14,9 @@ class ContentStrategyAgent {
     this.aiTextService = new AITextService(credentials?.credentials || credentials || {});
     this.trendingTopicDiscovery = options.trendingTopicDiscovery || new TrendingTopicDiscovery(credentials, options.discoveryOptions || {});
     this.semanticDedupService = options.semanticDedupService || new SemanticDedupService(options.dedupOptions || {});
+    this.topicPerformanceScorer = options.topicPerformanceScorer || new TopicPerformanceScorer(options.topicScorerOptions || {});
+    this.historicalKeywords = [];
+    this.channelBaseline = 0;
   }
 
   async initialize() {
@@ -31,11 +34,32 @@ class ContentStrategyAgent {
       this.logger.warn('No historical data found, starting fresh');
       this.historicalPerformance = [];
     }
+
+    try {
+      if (this.db && typeof this.db.getKeywordPerformance === 'function') {
+        this.historicalKeywords = await this.db.getKeywordPerformance({ limit: 100 });
+        if (typeof this.db.getKeywordBaseline === 'function') {
+          const baselineData = await this.db.getKeywordBaseline();
+          this.channelBaseline = baselineData?.baselineViews || 0;
+        } else {
+          this.channelBaseline = this.topicPerformanceScorer.calculateChannelBaseline(this.historicalKeywords);
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`Could not load historical keyword performance: ${err.message}`);
+      this.historicalKeywords = [];
+      this.channelBaseline = 0;
+    }
   }
 
   async analyzeTrends(options = {}) {
     try {
-      const result = await this.trendingTopicDiscovery.discoverTrendingTopics(options);
+      const discoveryOptions = {
+        ...options,
+        keywordData: options.keywordData || this.historicalKeywords,
+        baseline: options.baseline !== undefined ? options.baseline : this.channelBaseline
+      };
+      const result = await this.trendingTopicDiscovery.discoverTrendingTopics(discoveryOptions);
       this.competitorData = result.competitorData;
       this.trendingTopics = result.trendingTopics;
       this.logger.info(`Identified ${this.trendingTopics.length} trending topics`);
@@ -138,7 +162,9 @@ class ContentStrategyAgent {
       topic: item.topic,
       score: Number(item.score || 0),
       sources: [...new Set(item.sources || [])],
-      evidence: item.evidence || []
+      evidence: item.evidence || [],
+      performanceMultiplier: item.performanceMultiplier ?? 1.0,
+      performanceSignal: item.performanceSignal || null
     }));
     const sourceCatalog = [...new Map(
       signals.flatMap(signal => signal.evidence || []).map(source => [source.url, source])
@@ -172,6 +198,9 @@ class ContentStrategyAgent {
       const fallback = this.buildFallbackAutonomousPlan(channelStrategy, research, targetCount);
       plan = this.normalizeAutonomousPlan([...plan, ...fallback], channelStrategy, targetCount, research);
     }
+
+    // A5.1: Enforce autonomous plan exploration vs exploitation policy
+    plan = this.enforcePlanExplorationPolicy(plan, channelStrategy, targetCount, research);
 
     return { research, plan };
   }
@@ -237,6 +266,260 @@ Do not invent trend data, statistics, sources, URLs, or factual claims. Use only
       length: channelStrategy.default_length,
       sourceUrls: research.signals.find(signal => signal.topic === topic)?.evidence?.map(source => source.url) || []
     }));
+  }
+
+  /**
+   * Enforces autonomous plan exploration policy (Milestone A5.1).
+   * 
+   * Policy:
+   * - If targetCount >= 2: at least 1 selected candidate MUST be genuinely novel
+   *   to the channel's historical topic/keyword performance.
+   * - If targetCount == 1: no forced exploration replacement is required.
+   * - Never bypass semantic deduplication or select banned topics.
+   * - If no valid novel candidate exists, fails safely by keeping the best valid candidate.
+   * 
+   * @param {Array<Object>} plan
+   * @param {Object} channelStrategy
+   * @param {number} targetCount
+   * @param {Object} research
+   * @returns {Array<Object>} Plan preserving exploration requirement
+   */
+  enforcePlanExplorationPolicy(plan, channelStrategy = {}, targetCount = 1, research = {}) {
+    if (!Array.isArray(plan) || plan.length === 0) return plan;
+    if (targetCount < 2) return plan;
+
+    // 1. Check if at least one candidate in plan is already novel to the channel
+    const hasNovelTopic = plan.some(item =>
+      this.topicPerformanceScorer.isNovelTopic(item.topic, this.historicalKeywords)
+    );
+
+    if (hasNovelTopic) {
+      this.logger.info('Exploration requirement satisfied: plan contains at least one novel topic');
+      return plan;
+    }
+
+    this.logger.info('No novel topics in current autonomous plan; seeking valid exploration candidate...');
+
+    // 2. Prepare exclusion list and validation checks
+    const recentTopics = Array.isArray(research?.recentTopics) ? research.recentTopics : [];
+    const banned = [
+      ...(Array.isArray(channelStrategy?.bannedTopics) ? channelStrategy.bannedTopics : []),
+      ...(typeof channelStrategy?.banned_topics === 'string'
+        ? JSON.parse(channelStrategy.banned_topics || '[]')
+        : Array.isArray(channelStrategy?.banned_topics) ? channelStrategy.banned_topics : [])
+    ].map(t => String(t).trim().toLowerCase()).filter(Boolean);
+
+    const isBanned = (topicText) => {
+      const lower = topicText.toLowerCase();
+      return banned.some(b => b && lower.includes(b));
+    };
+
+    const isValidFormat = (topicText) => {
+      if (!topicText || typeof topicText !== 'string') return false;
+      const trimmed = topicText.trim();
+      return trimmed.length >= 8 && trimmed.includes(' ');
+    };
+
+    const pillars = Array.isArray(channelStrategy?.contentPillars) ? channelStrategy.contentPillars : [];
+    const allowedSourceUrls = new Set((research?.sourceCatalog || []).map(s => s.url));
+
+    // Candidates to keep: all except the last item (lowest priority slot)
+    const keptTopics = plan.slice(0, plan.length - 1).map(p => p.topic);
+    const exclusionList = [...recentTopics, ...keptTopics];
+
+    // Build candidate pool for exploration:
+    // Pool 1: Unused research signals
+    const planTopicSet = new Set(plan.map(p => String(p.topic).trim().toLowerCase()));
+    const signals = Array.isArray(research?.signals) ? research.signals : [];
+    const novelSignals = signals.filter(sig => {
+      const topicText = typeof sig === 'string' ? sig : sig?.topic;
+      return topicText && !planTopicSet.has(topicText.trim().toLowerCase());
+    });
+
+    // Pool 2: Evergreen fallback topics
+    const evergreen = this.getEvergreenFallbackTopics();
+
+    const candidatePool = [
+      ...novelSignals.map(sig => ({
+        topic: typeof sig === 'string' ? sig : sig.topic,
+        sourceUrls: (sig.evidence || []).map(e => e?.url).filter(url => allowedSourceUrls.has(url)),
+        tier: 'signals'
+      })),
+      ...evergreen.map(topic => ({
+        topic,
+        sourceUrls: [],
+        tier: 'evergreen'
+      }))
+    ];
+
+    let chosenNovelCandidate = null;
+    for (const cand of candidatePool) {
+      if (!cand.topic || !isValidFormat(cand.topic)) continue;
+      const trimmedTopic = cand.topic.trim();
+
+      // Must be genuinely novel to own-channel keyword performance history
+      if (!this.topicPerformanceScorer.isNovelTopic(trimmedTopic, this.historicalKeywords)) {
+        continue;
+      }
+
+      // Must not be banned
+      if (isBanned(trimmedTopic)) continue;
+
+      // Must not be in exclusion list (exact match)
+      if (exclusionList.some(ex => ex.toLowerCase() === trimmedTopic.toLowerCase())) continue;
+
+      // Must pass semantic deduplication
+      if (this.semanticDedupService) {
+        const dedupResult = this.semanticDedupService.isDuplicate(trimmedTopic, exclusionList);
+        if (dedupResult?.isDuplicate) continue;
+      }
+
+      // Valid novel candidate found!
+      const lowerTopic = trimmedTopic.toLowerCase();
+      const matchedPillar = pillars.find(p => lowerTopic.includes(String(p).toLowerCase())) || pillars[0] || '';
+      chosenNovelCandidate = {
+        topic: trimmedTopic,
+        pillar: matchedPillar,
+        angle: `${trimmedTopic} through the lens of ${channelStrategy?.value_proposition || channelStrategy?.objective || 'practical guidance'}`,
+        rationale: `Selected as autonomous exploration candidate to evaluate novel topic space without historical performance bias (${cand.tier}).`,
+        format: channelStrategy?.default_format || 'explainer',
+        length: channelStrategy?.default_length || 'medium',
+        sourceUrls: cand.sourceUrls,
+        isExploration: true,
+        performanceMultiplier: 1.0
+      };
+      break;
+    }
+
+    if (chosenNovelCandidate) {
+      this.logger.info(`Exploration policy replaced slot ${plan.length} with novel topic "${chosenNovelCandidate.topic}"`);
+      const updatedPlan = [...plan];
+      updatedPlan[updatedPlan.length - 1] = chosenNovelCandidate;
+      return updatedPlan;
+    }
+
+    this.logger.warn('No valid novel candidate found for exploration requirement; continuing with best valid candidates');
+    return plan;
+  }
+
+  selectFallbackCandidate(channelStrategy = {}, research = {}, excludedTopics = []) {
+    const excludedList = [];
+    const addExcluded = (item) => {
+      if (!item) return;
+      if (typeof item === 'string') {
+        const trimmed = item.trim();
+        if (trimmed) excludedList.push(trimmed);
+      } else if (typeof item === 'object') {
+        const t = item.topic || item.title;
+        if (t && typeof t === 'string' && t.trim()) excludedList.push(t.trim());
+      }
+    };
+
+    // 1. 90-day historical content
+    if (Array.isArray(research?.recentTopics)) {
+      research.recentTopics.forEach(addExcluded);
+    }
+
+    // 2. Current plan topics
+    if (Array.isArray(research?.plan)) {
+      research.plan.forEach(addExcluded);
+    }
+
+    // 3. Topics already attempted in this run
+    if (Array.isArray(excludedTopics)) {
+      excludedTopics.forEach(addExcluded);
+    } else if (excludedTopics) {
+      addExcluded(excludedTopics);
+    }
+
+    // 4. Channel banned topics and constraints
+    const banned = [
+      ...(Array.isArray(channelStrategy?.bannedTopics) ? channelStrategy.bannedTopics : []),
+      ...(typeof channelStrategy?.banned_topics === 'string'
+        ? JSON.parse(channelStrategy.banned_topics || '[]')
+        : Array.isArray(channelStrategy?.banned_topics) ? channelStrategy.banned_topics : [])
+    ].map(t => String(t).trim().toLowerCase()).filter(Boolean);
+
+    const isBanned = (topicText) => {
+      const lower = topicText.toLowerCase();
+      for (const b of banned) {
+        if (b && lower.includes(b)) return true;
+      }
+      return false;
+    };
+
+    const isValidFormat = (topicText) => {
+      if (!topicText || typeof topicText !== 'string') return false;
+      const trimmed = topicText.trim();
+      return trimmed.length >= 8 && trimmed.includes(' ');
+    };
+
+    const pillars = Array.isArray(channelStrategy?.contentPillars) ? channelStrategy.contentPillars : [];
+    const allowedSourceUrls = new Set((research?.sourceCatalog || []).map(s => s.url));
+
+    const checkCandidate = (candTopic, sourceUrls = [], rationale = '', tier = 'signals') => {
+      if (!isValidFormat(candTopic)) return null;
+
+      const trimmedCand = candTopic.trim();
+      const lowerCand = trimmedCand.toLowerCase();
+
+      // Check exact duplicate against excluded list
+      if (excludedList.some(ex => ex.toLowerCase() === lowerCand)) return null;
+
+      // Check banned topics
+      if (isBanned(trimmedCand)) return null;
+
+      // Check Semantic Deduplication
+      if (this.semanticDedupService) {
+        const dedupResult = this.semanticDedupService.isDuplicate(trimmedCand, excludedList);
+        if (dedupResult?.isDuplicate) return null;
+      }
+
+      const matchedPillar = pillars.find(p => lowerCand.includes(String(p).toLowerCase())) || pillars[0] || '';
+      const validSourceUrls = sourceUrls.filter(url => allowedSourceUrls.has(url));
+
+      return {
+        topic: trimmedCand,
+        pillar: matchedPillar,
+        angle: `${trimmedCand} through the lens of ${channelStrategy?.value_proposition || channelStrategy?.objective || 'practical guidance'}`,
+        rationale: rationale || (tier === 'signals'
+          ? 'Matches an unused research signal and selected as dynamic fallback topic.'
+          : 'Selected from vetted evergreen topics as dynamic fallback when research signals were exhausted.'),
+        format: channelStrategy?.default_format || 'explainer',
+        length: channelStrategy?.default_length || 'medium',
+        sourceUrls: validSourceUrls,
+        tier
+      };
+    };
+
+    // TIER 1: Unused candidates from current run's research.signals
+    const signals = Array.isArray(research?.signals) ? research.signals : [];
+    for (const signal of signals) {
+      const sigTopic = typeof signal === 'string' ? signal : signal?.topic;
+      if (!sigTopic) continue;
+      const evidenceUrls = (signal.evidence || []).map(e => e?.url).filter(Boolean);
+      const result = checkCandidate(
+        sigTopic,
+        evidenceUrls,
+        `Matches research signal "${sigTopic}" with verified evidence.`,
+        'signals'
+      );
+      if (result) return result;
+    }
+
+    // TIER 2: Deterministic evergreen fallback topics
+    const evergreen = this.getEvergreenFallbackTopics();
+    for (const egTopic of evergreen) {
+      const result = checkCandidate(
+        egTopic,
+        [],
+        'Selected from vetted evergreen topics as dynamic fallback when research signals were exhausted.',
+        'evergreen'
+      );
+      if (result) return result;
+    }
+
+    return null;
   }
 
   normalizeAutonomousPlan(plan, channelStrategy, targetCount, research = {}) {
@@ -368,10 +651,18 @@ Avoid fabricated claims and unsupported numbers.`;
     // Fallback safety: ensure exact lexical matches are also excluded
     const scoredTopics = dedupedTopics
       .filter(topic => !recentTopics.includes(topic.topic))
-      .map(topic => ({
-        ...topic,
-        finalScore: topic.score * this.getSeasonalMultiplier(topic.topic) * this.getAudienceMultiplier(topic.topic)
-      }))
+      .map(topic => {
+        const perfMultiplier = topic.performanceMultiplier !== undefined
+          ? topic.performanceMultiplier
+          : (this.topicPerformanceScorer
+              ? this.topicPerformanceScorer.scoreTopic(topic.topic, this.historicalKeywords, this.channelBaseline).multiplier
+              : 1.0);
+        return {
+          ...topic,
+          performanceMultiplier: perfMultiplier,
+          finalScore: topic.score * this.getSeasonalMultiplier(topic.topic) * this.getAudienceMultiplier(topic.topic) * perfMultiplier
+        };
+      })
       .sort((a, b) => b.finalScore - a.finalScore);
 
     // Single keywords scraped from trending titles ("crown", "official") make

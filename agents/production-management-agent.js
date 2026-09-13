@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs').promises;
 const { Logger } = require('../utils/logger');
@@ -46,33 +47,237 @@ class ProductionManagementAgent {
     }
   }
 
+  async resolveProductionId(jobId, explicitId = null) {
+    if (explicitId) return explicitId;
+    if (jobId && this.db?.getGenerationCheckpoint) {
+      try {
+        const cp = await this.db.getGenerationCheckpoint(jobId, 'production');
+        if (cp?.artifact?.productionId || cp?.artifact?.id) {
+          return cp.artifact.productionId || cp.artifact.id;
+        }
+      } catch (_err) {
+        void _err;
+      }
+    }
+    if (jobId && this.db?.getGenerationJob) {
+      try {
+        const job = await this.db.getGenerationJob(jobId);
+        if (job?.production_id) {
+          return job.production_id;
+        }
+      } catch (_err) {
+        void _err;
+      }
+    }
+    return jobId ? `prod_${jobId}` : this.generateProductionId();
+  }
+
+  async getIntraProductionManifest(jobId, productionId = null) {
+    return await this.loadIntraProductionManifest(jobId, productionId);
+  }
+
+  computeScriptHash(script = {}) {
+    const components = [
+      script.title || '',
+      script.fullScript || '',
+      JSON.stringify(script.mainContent || []),
+      script.hook?.text || (typeof script.hook === 'string' ? script.hook : ''),
+      script.introduction?.topicIntro || (typeof script.introduction === 'string' ? script.introduction : ''),
+      JSON.stringify(script.conclusion || {}),
+      JSON.stringify(script.callToAction || {}),
+      JSON.stringify(script.truthAnchor || []),
+      JSON.stringify(script.claims || [])
+    ];
+    return crypto.createHash('sha256').update(components.join(':::')).digest('hex');
+  }
+
+  computeFingerprint(data) {
+    return crypto.createHash('sha256').update(String(data || '')).digest('hex');
+  }
+
+  invalidateDownstream(manifest, fromSubstage) {
+    if (!manifest || !manifest.substages) return;
+    const substageOrder = ['script_prep', 'tts', 'visuals', 'captions', 'assembly'];
+    const index = substageOrder.indexOf(fromSubstage);
+    if (index === -1) return;
+    for (let i = index; i < substageOrder.length; i++) {
+      const stage = substageOrder[i];
+      if (manifest.substages[stage]) {
+        manifest.substages[stage].status = 'invalid';
+        manifest.substages[stage].invalidatedAt = new Date().toISOString();
+      }
+    }
+  }
+
+  async validateSubstageArtifact(substage, manifestItem, currentFingerprint) {
+    if (!manifestItem || manifestItem.status !== 'completed') return false;
+    if (currentFingerprint && manifestItem.fingerprint !== currentFingerprint) return false;
+    const artifacts = manifestItem.artifacts;
+    if (!artifacts || typeof artifacts !== 'object') return false;
+
+    if (substage === 'script_prep') {
+      if (!artifacts.originalPath || !artifacts.ttsPath) return false;
+      return (await this.pathExists(artifacts.originalPath)) && (await this.pathExists(artifacts.ttsPath));
+    }
+
+    if (substage === 'tts') {
+      const filePath = artifacts.path;
+      if (!filePath || artifacts.simulated === true) return false;
+      if (!this.isValidMediaExtension(filePath, ['.mp3', '.wav', '.m4a', '.ogg'])) return false;
+      if (!await this.pathExists(filePath)) return false;
+      if (this.aiVideoGenerator?.isUsableAudioFile) {
+        return await this.aiVideoGenerator.isUsableAudioFile(filePath);
+      }
+      return true;
+    }
+
+    if (substage === 'visuals') {
+      const visualAssets = artifacts.visualAssets;
+      if (!Array.isArray(visualAssets) || visualAssets.length === 0) return false;
+      for (const asset of visualAssets) {
+        const p = typeof asset === 'string' ? asset : asset?.path;
+        if (!p || !await this.pathExists(p)) return false;
+        if (!this.isValidMediaExtension(p, ['.png', '.jpg', '.jpeg', '.webp', '.mp4'])) return false;
+      }
+      return true;
+    }
+
+    if (substage === 'captions') {
+      const filePath = artifacts.path;
+      if (!filePath || !await this.pathExists(filePath)) return false;
+      if (!this.isValidMediaExtension(filePath, ['.srt', '.vtt', '.ass'])) return false;
+      return true;
+    }
+
+    if (substage === 'assembly') {
+      const filePath = artifacts.path;
+      if (!filePath || artifacts.simulated === true) return false;
+      if (!this.isValidMediaExtension(filePath, ['.mp4', '.mov', '.mkv', '.webm'])) return false;
+      return await this.pathExists(filePath);
+    }
+
+    return false;
+  }
+
+  isValidMediaExtension(filePath, allowedExtensions) {
+    const invalidExts = ['.assembly.json', '.info', '.placeholder'];
+    const lower = String(filePath || '').toLowerCase();
+    if (invalidExts.some(ext => lower.endsWith(ext))) return false;
+    const ext = path.extname(lower);
+    return allowedExtensions.includes(ext);
+  }
+
+  async pathExists(filePath) {
+    try {
+      const stat = await fs.stat(filePath);
+      return stat.isFile() && stat.size > 0;
+    } catch (_err) {
+      return false;
+    }
+  }
+
+  async saveIntraProductionManifest(jobId, productionId, manifest) {
+    manifest.updatedAt = new Date().toISOString();
+    try {
+      const manifestDir = path.join(__dirname, '..', 'data', 'production');
+      await fs.mkdir(manifestDir, { recursive: true });
+      const manifestPath = path.join(manifestDir, `${productionId}_manifest.json`);
+      await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+    } catch (err) {
+      this.logger.warn(`Failed to save manifest file to disk: ${err.message}`);
+    }
+
+    if (jobId && this.db?.saveGenerationCheckpoint) {
+      try {
+        await this.db.saveGenerationCheckpoint(jobId, 'production', {
+          status: manifest.status || 'running',
+          artifact: manifest
+        });
+      } catch (err) {
+        this.logger.warn(`Failed to save intra-production checkpoint to DB: ${err.message}`);
+      }
+    }
+  }
+
+  async loadIntraProductionManifest(jobId, productionId) {
+    if (jobId && this.db?.getGenerationCheckpoint) {
+      try {
+        const checkpoint = await this.db.getGenerationCheckpoint(jobId, 'production');
+        if (checkpoint?.artifact?.productionManifest?.substages) {
+          return checkpoint.artifact.productionManifest;
+        }
+        if (checkpoint?.artifact?.substages) {
+          return checkpoint.artifact;
+        }
+      } catch (_err) {
+        void _err;
+      }
+    }
+
+    if (productionId) {
+      try {
+        const manifestPath = path.join(__dirname, '..', 'data', 'production', `${productionId}_manifest.json`);
+        const data = await fs.readFile(manifestPath, 'utf8');
+        return JSON.parse(data);
+      } catch (_err) {
+        void _err;
+      }
+    }
+
+    return null;
+  }
+
   async processContent(contentData) {
     try {
       this.logger.info('Processing content for production...');
       
-      const { strategy, script, thumbnail, seo, jobId = null } = contentData;
+      const { strategy, script, thumbnail, seo, jobId = null, id: existingId = null, productionId: explicitProductionId = null } = contentData;
       
-      // Create production entry
-      const productionId = this.generateProductionId();
+      // 1. Resolve deterministic production ID
+      const productionId = await this.resolveProductionId(jobId, explicitProductionId || existingId);
+      const scriptHash = this.computeScriptHash(script);
       
+      // 2. Load or initialize intra-production manifest
+      let manifest = await this.loadIntraProductionManifest(jobId, productionId);
+      if (!manifest || typeof manifest !== 'object') {
+        manifest = {
+          productionId,
+          jobId,
+          scriptHash,
+          status: 'processing',
+          substages: {},
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+      } else {
+        if (manifest.scriptHash && manifest.scriptHash !== scriptHash) {
+          this.logger.warn(`Script hash mismatch for ${productionId}. Invalidating downstream production checkpoints.`);
+          manifest.substages = {};
+          manifest.scriptHash = scriptHash;
+        }
+        manifest.status = 'processing';
+        manifest.updatedAt = new Date().toISOString();
+      }
+
       const productionData = {
         id: productionId,
+        productionId,
         strategy,
         script,
         thumbnail,
         seo,
         status: 'processing',
         assets: {
-          script: await this.processScript(script),
-          thumbnail: await this.processThumbnail(thumbnail, script),
-          audio: null, // Will be generated later
-          video: null, // Will be generated later
-          captions: null // Will be generated later
+          script: null,
+          thumbnail: null,
+          audio: null,
+          video: null,
+          captions: null
         },
         timeline: {
-          created: new Date().toISOString(),
-          scriptReady: new Date().toISOString(),
-          thumbnailReady: new Date().toISOString(),
+          created: manifest.createdAt || new Date().toISOString(),
+          scriptReady: null,
+          thumbnailReady: null,
           audioGenerated: null,
           videoGenerated: null,
           captionsGenerated: null,
@@ -81,41 +286,266 @@ class ProductionManagementAgent {
         scheduledPublishTime: this.calculatePublishTime(strategy),
         priority: this.calculatePriority(strategy),
         estimatedDuration: script.duration,
-        createdAt: new Date().toISOString()
+        createdAt: manifest.createdAt || new Date().toISOString(),
+        jobId,
+        scriptHash,
+        substages: manifest.substages
       };
-      productionData.jobId = jobId;
-      
-      // Add to pipeline
-      this.pipeline.push(productionData);
-      
-      // Save to database
-      await this.db.saveProductionData(productionData);
-      
-      // Generate video content
-      await this.generateVideoContent(productionData);
-      
-      // Generate audio narration
-      await this.generateAudioNarration(productionData);
-      
-      // Generate captions
-      await this.generateCaptions(productionData);
-      
-      // Final assembly
-      await this.assembleVideo(productionData);
+
+      // Substage 1: script_prep
+      let scriptArtifact = null;
+      if (await this.validateSubstageArtifact('script_prep', manifest.substages?.script_prep, scriptHash)) {
+        this.logger.info(`[Recovery] Reusing verified script_prep checkpoint for ${productionId}`);
+        scriptArtifact = manifest.substages.script_prep.artifacts;
+      } else {
+        this.invalidateDownstream(manifest, 'script_prep');
+        try {
+          scriptArtifact = await this.processScript(script, productionId);
+          manifest.substages.script_prep = {
+            status: 'completed',
+            fingerprint: scriptHash,
+            artifacts: scriptArtifact,
+            completedAt: new Date().toISOString()
+          };
+          await this.saveIntraProductionManifest(jobId, productionId, manifest);
+        } catch (scriptErr) {
+          manifest.substages.script_prep = {
+            status: 'failed',
+            fingerprint: scriptHash,
+            error: scriptErr.message,
+            completedAt: new Date().toISOString()
+          };
+          await this.saveIntraProductionManifest(jobId, productionId, manifest);
+          throw scriptErr;
+        }
+      }
+      productionData.assets.script = scriptArtifact;
+      productionData.timeline.scriptReady = manifest.substages.script_prep.completedAt || new Date().toISOString();
+
+      // Thumbnail pass-through
+      productionData.assets.thumbnail = await this.processThumbnail(thumbnail, script, productionId);
+      productionData.timeline.thumbnailReady = new Date().toISOString();
+
+      // Substage 2: tts
+      const ttsText = await fs.readFile(productionData.assets.script.ttsPath, 'utf8');
+      const ttsHash = this.computeFingerprint(ttsText);
+      let audioArtifact = null;
+
+      if (await this.validateSubstageArtifact('tts', manifest.substages?.tts, ttsHash)) {
+        this.logger.info(`[Recovery] Reusing verified TTS audio checkpoint for ${productionId}`);
+        audioArtifact = manifest.substages.tts.artifacts;
+      } else {
+        this.invalidateDownstream(manifest, 'tts');
+        try {
+          await this.generateAudioNarration(productionData, ttsText);
+          audioArtifact = productionData.assets.audio;
+          if (audioArtifact && audioArtifact.status === 'ready' && !audioArtifact.simulated) {
+            manifest.substages.tts = {
+              status: 'completed',
+              fingerprint: ttsHash,
+              artifacts: audioArtifact,
+              completedAt: new Date().toISOString()
+            };
+            await this.saveIntraProductionManifest(jobId, productionId, manifest);
+          } else {
+            manifest.substages.tts = {
+              status: 'failed',
+              fingerprint: ttsHash,
+              error: audioArtifact?.error || 'TTS audio generation failed or produced placeholder',
+              artifacts: audioArtifact,
+              completedAt: new Date().toISOString()
+            };
+            await this.saveIntraProductionManifest(jobId, productionId, manifest);
+          }
+        } catch (ttsErr) {
+          manifest.substages.tts = {
+            status: 'failed',
+            fingerprint: ttsHash,
+            error: ttsErr.message,
+            completedAt: new Date().toISOString()
+          };
+          await this.saveIntraProductionManifest(jobId, productionId, manifest);
+          throw ttsErr;
+        }
+      }
+      productionData.assets.audio = audioArtifact;
+      productionData.timeline.audioGenerated = manifest.substages.tts?.completedAt || new Date().toISOString();
+
+      // Substage 3: visuals
+      const visualPrompts = this.createVisualPromptsFromScript(script);
+      const visualsHash = this.computeFingerprint(visualPrompts.join('|||') + ':::' + scriptHash);
+      let videoArtifact = null;
+
+      if (await this.validateSubstageArtifact('visuals', manifest.substages?.visuals, visualsHash)) {
+        this.logger.info(`[Recovery] Reusing verified visual assets checkpoint for ${productionId}`);
+        videoArtifact = manifest.substages.visuals.artifacts;
+      } else {
+        const existingVisualAssets = manifest.substages?.visuals?.artifacts?.visualAssets || [];
+        this.invalidateDownstream(manifest, 'visuals');
+        try {
+          await this.generateVideoContent(productionData, visualPrompts, existingVisualAssets);
+          videoArtifact = productionData.assets.video;
+          if (videoArtifact && Array.isArray(videoArtifact.visualAssets) && videoArtifact.visualAssets.length > 0) {
+            manifest.substages.visuals = {
+              status: 'completed',
+              fingerprint: visualsHash,
+              artifacts: videoArtifact,
+              completedAt: new Date().toISOString()
+            };
+            await this.saveIntraProductionManifest(jobId, productionId, manifest);
+          } else {
+            manifest.substages.visuals = {
+              status: 'failed',
+              fingerprint: visualsHash,
+              error: 'Visual content generation produced no assets',
+              completedAt: new Date().toISOString()
+            };
+            await this.saveIntraProductionManifest(jobId, productionId, manifest);
+            if (jobId) {
+              throw new Error('Visual content generation produced no assets');
+            }
+          }
+        } catch (visErr) {
+          manifest.substages.visuals = {
+            status: 'failed',
+            fingerprint: visualsHash,
+            error: visErr.message,
+            completedAt: new Date().toISOString()
+          };
+          await this.saveIntraProductionManifest(jobId, productionId, manifest);
+          throw visErr;
+        }
+      }
+      productionData.assets.video = videoArtifact || productionData.assets.video;
+      productionData.timeline.videoGenerated = manifest.substages.visuals?.completedAt || new Date().toISOString();
+
+      // Substage 4: captions
+      const captionsHash = this.computeFingerprint(`${scriptHash}:::${productionData.assets.audio?.duration || script.duration}`);
+      let captionsArtifact = null;
+
+      if (await this.validateSubstageArtifact('captions', manifest.substages?.captions, captionsHash)) {
+        this.logger.info(`[Recovery] Reusing verified captions checkpoint for ${productionId}`);
+        captionsArtifact = manifest.substages.captions.artifacts;
+      } else {
+        this.invalidateDownstream(manifest, 'captions');
+        try {
+          await this.generateCaptions(productionData);
+          captionsArtifact = productionData.assets.captions;
+          if (captionsArtifact && await this.pathExists(captionsArtifact.path)) {
+            manifest.substages.captions = {
+              status: 'completed',
+              fingerprint: captionsHash,
+              artifacts: captionsArtifact,
+              completedAt: new Date().toISOString()
+            };
+            await this.saveIntraProductionManifest(jobId, productionId, manifest);
+          } else {
+            manifest.substages.captions = {
+              status: 'failed',
+              fingerprint: captionsHash,
+              error: 'Caption generation failed or produced missing file',
+              artifacts: captionsArtifact,
+              completedAt: new Date().toISOString()
+            };
+            await this.saveIntraProductionManifest(jobId, productionId, manifest);
+            if (jobId) {
+              throw new Error('Caption generation failed or produced missing file');
+            }
+          }
+        } catch (capErr) {
+          manifest.substages.captions = {
+            status: 'failed',
+            fingerprint: captionsHash,
+            error: capErr.message,
+            completedAt: new Date().toISOString()
+          };
+          await this.saveIntraProductionManifest(jobId, productionId, manifest);
+          throw capErr;
+        }
+      }
+      productionData.assets.captions = captionsArtifact;
+      productionData.timeline.captionsGenerated = manifest.substages.captions?.completedAt || new Date().toISOString();
+
+      // Substage 5: assembly
+      const assemblyHash = this.computeFingerprint(
+        `${scriptHash}:::${productionData.assets.audio?.path}:::${(productionData.assets.video?.visualAssets || []).map(a => (typeof a === 'string' ? a : a.path)).join(',')}`
+      );
+      let finalVideoArtifact = null;
+
+      if (await this.validateSubstageArtifact('assembly', manifest.substages?.assembly, assemblyHash)) {
+        this.logger.info(`[Recovery] Reusing verified final video assembly checkpoint for ${productionId}`);
+        finalVideoArtifact = manifest.substages.assembly.artifacts;
+        productionData.assets.finalVideo = finalVideoArtifact;
+        productionData.status = 'ready';
+        productionData.timeline.readyForUpload = manifest.substages.assembly.completedAt || new Date().toISOString();
+      } else {
+        this.invalidateDownstream(manifest, 'assembly');
+        try {
+          await this.assembleVideo(productionData);
+          finalVideoArtifact = productionData.assets.finalVideo;
+
+          const isRealVideo = finalVideoArtifact?.path &&
+            !finalVideoArtifact.simulated &&
+            path.extname(finalVideoArtifact.path).toLowerCase() === '.mp4' &&
+            !finalVideoArtifact.path.endsWith('.assembly.json') &&
+            await this.pathExists(finalVideoArtifact.path);
+
+          if (isRealVideo) {
+            manifest.substages.assembly = {
+              status: 'completed',
+              fingerprint: assemblyHash,
+              artifacts: finalVideoArtifact,
+              completedAt: new Date().toISOString()
+            };
+            productionData.status = 'ready';
+            productionData.timeline.readyForUpload = new Date().toISOString();
+            await this.saveIntraProductionManifest(jobId, productionId, manifest);
+          } else {
+            const errorMsg = finalVideoArtifact?.blockedReason || 'Final video assembly failed or produced simulation placeholder';
+            manifest.substages.assembly = {
+              status: 'failed',
+              fingerprint: assemblyHash,
+              error: errorMsg,
+              artifacts: finalVideoArtifact,
+              completedAt: new Date().toISOString()
+            };
+            productionData.status = 'simulated';
+            await this.saveIntraProductionManifest(jobId, productionId, manifest);
+            if (jobId) {
+              throw new Error(errorMsg);
+            }
+          }
+        } catch (asmErr) {
+          manifest.substages.assembly = {
+            status: 'failed',
+            fingerprint: assemblyHash,
+            error: asmErr.message,
+            completedAt: new Date().toISOString()
+          };
+          productionData.status = 'failed';
+          await this.saveIntraProductionManifest(jobId, productionId, manifest);
+          throw asmErr;
+        }
+      }
 
       // Persist a scene-addressable production manifest for selective review and repair.
       await this.sceneRepair.initializeProduction(productionData, this.aiVideoGenerator.lastVideoResult || {});
 
-      // Mark as ready — or simulated, when no real video could be produced
-      const simulated = Boolean(productionData.assets.finalVideo?.simulated);
-      if (simulated) {
-        productionData.status = 'simulated';
-        this.logger.warn(`Content ${productionId} produced PLACEHOLDER assets only — it will NOT be uploaded. Check your AI provider keys and FFmpeg installation.`);
+      // Attach manifest metadata
+      productionData.substages = manifest.substages;
+      productionData.scriptHash = manifest.scriptHash;
+      productionData.productionManifest = manifest;
+
+      // Add to pipeline or update existing entry
+      const existingIdx = this.pipeline.findIndex(p => p.id === productionId);
+      if (existingIdx >= 0) {
+        this.pipeline[existingIdx] = productionData;
       } else {
-        productionData.status = 'ready';
-        productionData.timeline.readyForUpload = new Date().toISOString();
+        this.pipeline.push(productionData);
       }
 
+      // Save to database
+      await this.db.saveProductionData(productionData);
       await this.db.updateProductionData(productionData);
 
       this.logger.info(`Content processing complete: ${productionId} (status: ${productionData.status})`);
@@ -133,24 +563,23 @@ class ProductionManagementAgent {
     return `prod_${timestamp}_${random}_${extra}`;
   }
 
-  async processScript(script) {
-    const scriptPath = path.join(__dirname, '..', 'data', 'scripts', `${Date.now()}_script.json`);
+  async processScript(script, productionId = null) {
+    const filename = productionId ? `${productionId}_script.json` : `${Date.now()}_script.json`;
+    const scriptPath = path.join(__dirname, '..', 'data', 'scripts', filename);
     
     // Create formatted script for TTS
     const ttsScript = this.formatScriptForTTS(script);
     
     // Save script files
     await fs.writeFile(scriptPath, JSON.stringify(script, null, 2));
-    await fs.writeFile(
-      scriptPath.replace('.json', '_tts.txt'), 
-      ttsScript
-    );
+    const ttsPath = scriptPath.replace('.json', '_tts.txt');
+    await fs.writeFile(ttsPath, ttsScript);
     
     return {
       originalPath: scriptPath,
-      ttsPath: scriptPath.replace('.json', '_tts.txt'),
+      ttsPath: ttsPath,
       duration: script.duration,
-      sections: script.mainContent.sections.length
+      sections: script.mainContent?.sections?.length || (Array.isArray(script.mainContent) ? script.mainContent.length : 0)
     };
   }
 
@@ -159,21 +588,29 @@ class ProductionManagementAgent {
     
     // Add hook
     if (script.hook) {
-      ttsText += `${script.hook.text}\n\n`;
+      ttsText += `${script.hook.text || (typeof script.hook === 'string' ? script.hook : '')}\n\n`;
     }
     
     // Add introduction
     if (script.introduction) {
-      ttsText += `${script.introduction.greeting}\n`;
-      ttsText += `${script.introduction.topicIntro}\n`;
-      ttsText += `${script.introduction.valueProposition}\n`;
-      ttsText += `${script.introduction.credibility}\n\n`;
+      if (typeof script.introduction === 'string') {
+        ttsText += `${script.introduction}\n\n`;
+      } else {
+        if (script.introduction.greeting) ttsText += `${script.introduction.greeting}\n`;
+        if (script.introduction.topicIntro) ttsText += `${script.introduction.topicIntro}\n`;
+        if (script.introduction.valueProposition) ttsText += `${script.introduction.valueProposition}\n`;
+        if (script.introduction.credibility) ttsText += `${script.introduction.credibility}\n\n`;
+      }
     }
     
     // Add main content
-    if (script.mainContent && script.mainContent.sections) {
-      script.mainContent.sections.forEach((section, index) => {
-        ttsText += `Section ${index + 1}: ${section.title}\n`;
+    if (script.fullScript && (!script.mainContent || (Array.isArray(script.mainContent) && script.mainContent.length === 0))) {
+      ttsText += `${script.fullScript}\n\n`;
+    } else if (script.mainContent) {
+      const sections = script.mainContent.sections || (Array.isArray(script.mainContent) ? script.mainContent : []);
+      sections.forEach((section, index) => {
+        if (section.title) ttsText += `Section ${index + 1}: ${section.title}\n`;
+        if (typeof section.text === 'string') ttsText += `${section.text}\n`;
         
         if (Array.isArray(section.content)) {
           section.content.forEach(line => {
@@ -200,33 +637,50 @@ class ProductionManagementAgent {
     
     // Add conclusion
     if (script.conclusion) {
-      script.conclusion.recap.forEach(line => {
-        if (typeof line === 'string') {
-          ttsText += `${line}\n`;
-        }
-      });
-      ttsText += `\n${script.conclusion.finalThought}\n\n`;
+      if (Array.isArray(script.conclusion.recap)) {
+        script.conclusion.recap.forEach(line => {
+          if (typeof line === 'string') {
+            ttsText += `${line}\n`;
+          }
+        });
+      }
+      if (script.conclusion.finalThought) {
+        ttsText += `\n${script.conclusion.finalThought}\n\n`;
+      }
     }
     
     // Add CTA
     if (script.callToAction) {
-      ttsText += `${script.callToAction.subscribe}\n`;
-      ttsText += `${script.callToAction.like}\n`;
-      ttsText += `${script.callToAction.comment}\n`;
+      if (typeof script.callToAction === 'string') {
+        ttsText += `${script.callToAction}\n`;
+      } else {
+        if (script.callToAction.subscribe) ttsText += `${script.callToAction.subscribe}\n`;
+        if (script.callToAction.like) ttsText += `${script.callToAction.like}\n`;
+        if (script.callToAction.comment) ttsText += `${script.callToAction.comment}\n`;
+      }
     }
     
-    return ttsText;
+    return ttsText.trim() ? ttsText : (script.title || 'Untitled script');
   }
 
-  async processThumbnail(thumbnail, script) {
+  async processThumbnail(thumbnail, script, productionId = null) {
     try {
+      if (thumbnail?.path && await this.pathExists(thumbnail.path) && this.isValidMediaExtension(thumbnail.path, ['.jpg', '.jpeg', '.png', '.webp'])) {
+        return {
+          path: thumbnail.path,
+          originalPath: thumbnail.path,
+          dimensions: thumbnail.dimensions || { width: 1792, height: 1024 },
+          fileSize: thumbnail.fileSize || 0,
+          generatedWith: thumbnail.generatedWith || 'designer'
+        };
+      }
       // Try to generate AI thumbnail first
-      const thumbnailScript = thumbnail.script || script || { title: thumbnail.title || 'Untitled Video' };
+      const thumbnailScript = thumbnail?.script || script || { title: thumbnail?.title || 'Untitled Video' };
       const aiThumbnail = await this.aiVideoGenerator.generateThumbnail(thumbnailScript, 'ethereal');
       
       return {
         path: aiThumbnail.path,
-        originalPath: thumbnail.path,
+        originalPath: thumbnail?.path || aiThumbnail.path,
         dimensions: aiThumbnail.dimensions,
         fileSize: aiThumbnail.fileSize,
         generatedWith: 'AI'
@@ -235,12 +689,13 @@ class ProductionManagementAgent {
       this.logger.error('AI thumbnail generation failed:', error);
       
       // Fallback to original processing
+      const filename = productionId ? `thumbnail_${productionId}.jpg` : `thumbnail_${Date.now()}.jpg`;
       const productionThumbnailPath = path.join(
         __dirname, '..', 'data', 'assets', 
-        `thumbnail_${Date.now()}.jpg`
+        filename
       );
       
-      if (thumbnail.path && await fs.access(thumbnail.path).then(() => true).catch(() => false)) {
+      if (thumbnail?.path && await fs.access(thumbnail.path).then(() => true).catch(() => false)) {
         const originalBuffer = await fs.readFile(thumbnail.path);
         await fs.writeFile(productionThumbnailPath, originalBuffer);
       } else {
@@ -250,9 +705,9 @@ class ProductionManagementAgent {
       
       return {
         path: productionThumbnailPath,
-        originalPath: thumbnail.path,
-        dimensions: thumbnail.dimensions || { width: 1792, height: 1024 },
-        fileSize: thumbnail.fileSize || 0
+        originalPath: thumbnail?.path || null,
+        dimensions: thumbnail?.dimensions || { width: 1792, height: 1024 },
+        fileSize: thumbnail?.fileSize || 0
       };
     }
   }
@@ -293,19 +748,27 @@ class ProductionManagementAgent {
     return Math.min(100, priority);
   }
 
-  async generateVideoContent(productionData) {
+  async generateVideoContent(productionData, visualPromptsOverride = null, existingAssets = []) {
     this.logger.info('Generating AI video content...');
     
     try {
       const { script } = productionData;
       
       // Generate visual assets using DALL-E
-      const visualPrompts = this.createVisualPromptsFromScript(script);
+      const visualPrompts = visualPromptsOverride || this.createVisualPromptsFromScript(script);
       const visualAssets = [];
       
-      for (const prompt of visualPrompts) {
-        const assets = await this.aiVideoGenerator.generateVisualAssets(prompt, 'ethereal', 1);
-        visualAssets.push(...assets);
+      for (let i = 0; i < visualPrompts.length; i++) {
+        const prompt = visualPrompts[i];
+        const existing = existingAssets[i];
+        const existingPath = typeof existing === 'string' ? existing : existing?.path;
+        if (existingPath && await this.pathExists(existingPath) && this.isValidMediaExtension(existingPath, ['.png', '.jpg', '.jpeg', '.webp', '.mp4'])) {
+          this.logger.info(`[Recovery] Reusing verified visual scene ${i + 1}/${visualPrompts.length}: ${existingPath}`);
+          visualAssets.push(existing);
+        } else {
+          const assets = await this.aiVideoGenerator.generateVisualAssets(prompt, 'ethereal', 1);
+          visualAssets.push(...assets);
+        }
       }
       
       productionData.assets.video = {
@@ -322,6 +785,9 @@ class ProductionManagementAgent {
       return visualAssets;
     } catch (error) {
       this.logger.error('AI video content generation failed:', error);
+      if (productionData.jobId) {
+        throw error;
+      }
       // Fallback to placeholder
       return await this.createVideoElements(productionData);
     }
@@ -415,14 +881,16 @@ class ProductionManagementAgent {
     return elements;
   }
 
-  async generateAudioNarration(productionData) {
+  async generateAudioNarration(productionData, ttsTextOverride = null) {
     this.logger.info('Generating AI audio narration...');
     
     try {
       const audioPath = path.join(__dirname, '..', 'data', 'audio', `${productionData.id}_narration.mp3`);
       
       // Read the TTS script
-      const ttsText = await fs.readFile(productionData.assets.script.ttsPath, 'utf8');
+      const ttsText = ttsTextOverride || (productionData.assets?.script?.ttsPath
+        ? await fs.readFile(productionData.assets.script.ttsPath, 'utf8')
+        : this.formatScriptForTTS(productionData.script));
       
       // Generate audio using AI TTS and retain the provider evidence returned by the generator.
       const generatedPath = await this.aiVideoGenerator.generateTTSAudio(ttsText, audioPath);
@@ -450,6 +918,9 @@ class ProductionManagementAgent {
       return generatedPath;
     } catch (error) {
       this.logger.error('AI audio generation failed:', error);
+      if (productionData.jobId) {
+        throw error;
+      }
       return await this.simulateAudioGeneration(productionData, error);
     }
   }
@@ -613,6 +1084,9 @@ class ProductionManagementAgent {
       return finalVideoPath;
     } catch (error) {
       this.logger.error('AI video assembly failed:', error);
+      if (productionData.jobId) {
+        throw error;
+      }
       // Fallback to simulation
       return await this.simulateVideoAssembly(productionData);
     }

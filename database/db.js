@@ -4,8 +4,8 @@ const fs = require('fs').promises;
 const { Logger } = require('../utils/logger');
 
 class Database {
-  constructor() {
-    this.dbPath = path.join(__dirname, '..', 'data', 'youtube_automation.db');
+  constructor(customDbPath = null) {
+    this.dbPath = customDbPath || path.join(__dirname, '..', 'data', 'youtube_automation.db');
     this.db = null;
     this.logger = new Logger('Database');
   }
@@ -622,7 +622,30 @@ class Database {
         value TEXT NOT NULL,
         description TEXT,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-      )`
+      )`,
+      // Phase 7: Autonomous Daily Shorts Publications
+      `CREATE TABLE IF NOT EXISTS daily_shorts_publications (
+        production_id TEXT PRIMARY KEY,
+        topic TEXT NOT NULL,
+        video_path TEXT,
+        cover_path TEXT,
+        title TEXT NOT NULL,
+        description TEXT,
+        content_hash TEXT,
+        status TEXT NOT NULL,
+        qa_status TEXT,
+        youtube_status TEXT,
+        youtube_video_id TEXT,
+        scheduled_at TEXT,
+        published_at TEXT,
+        upload_attempts INTEGER DEFAULT 0,
+        last_error TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_daily_shorts_status ON daily_shorts_publications(status)`,
+      `CREATE INDEX IF NOT EXISTS idx_daily_shorts_content_hash ON daily_shorts_publications(content_hash)`,
+      `CREATE INDEX IF NOT EXISTS idx_daily_shorts_scheduled_at ON daily_shorts_publications(scheduled_at)`
     ];
 
     for (const tableQuery of tables) {
@@ -1068,6 +1091,110 @@ class Database {
     );
   }
 
+  async isProductionActiveOrRecoverable(productionId, jobId) {
+    // Critical safety rule: if neither identifier is available, preserve
+    if (!productionId && !jobId) return true;
+
+    try {
+      // 1. Check generation_jobs
+      if (jobId) {
+        const job = await this.getRow(
+          'SELECT id, status, cancel_requested, production_id FROM generation_jobs WHERE id = ?',
+          [jobId]
+        );
+        if (job) {
+          if (['queued', 'running', 'interrupted'].includes(job.status)) {
+            return true;
+          }
+          if (job.status === 'failed' && Number(job.cancel_requested || 0) === 0) {
+            // Check if job has valid checkpoints that could allow A4.4 recovery
+            const checkpoints = await this.getAllRows(
+              "SELECT stage, status FROM generation_checkpoints WHERE job_id = ? AND status IN ('completed', 'running', 'pending')",
+              [jobId]
+            );
+            if (checkpoints.length > 0) {
+              return true;
+            }
+          }
+        }
+      }
+
+      if (productionId) {
+        const prodJobs = await this.getAllRows(
+          'SELECT id, status FROM generation_jobs WHERE production_id = ?',
+          [productionId]
+        );
+        if (prodJobs.some(j => ['queued', 'running', 'interrupted'].includes(j.status))) {
+          return true;
+        }
+
+        // 2. Check productions table
+        const prod = await this.getRow(
+          'SELECT id, status FROM productions WHERE id = ?',
+          [productionId]
+        );
+        if (prod && ['processing', 'running', 'pending', 'generating'].includes(prod.status)) {
+          return true;
+        }
+
+        // 3. Check publish_schedule for active, pending, retry, or reconciliation_required states
+        const publishEntries = await this.getAllRows(
+          'SELECT id, status FROM publish_schedule WHERE production_id = ?',
+          [productionId]
+        );
+        if (publishEntries.some(e => ['scheduled', 'uploading', 'reconciliation_required', 'retry_pending', 'paused'].includes(e.status))) {
+          return true;
+        }
+
+        // 4. Check shorts_clips for active, rendering, or reconciliation_required states
+        const clips = await this.getAllRows(
+          'SELECT id, status FROM shorts_clips WHERE production_id = ?',
+          [productionId]
+        );
+        if (clips.some(c => ['proposed', 'rendering', 'rendered', 'approved', 'scheduled', 'uploading', 'reconciliation_required'].includes(c.status))) {
+          return true;
+        }
+      }
+
+      // 5. Check operator_runs in active/interrupted/cancelling states
+      const activeOperatorRuns = await this.getAllRows(
+        "SELECT id, generated_jobs FROM operator_runs WHERE status IN ('queued', 'running', 'cancelling', 'interrupted')"
+      );
+      for (const run of activeOperatorRuns) {
+        try {
+          const jobIds = JSON.parse(run.generated_jobs || '[]');
+          if (Array.isArray(jobIds)) {
+            if (jobId && jobIds.includes(jobId)) return true;
+            if (productionId) {
+              for (const jId of jobIds) {
+                const j = await this.getRow('SELECT production_id FROM generation_jobs WHERE id = ?', [jId]);
+                if (j?.production_id === productionId) return true;
+              }
+            }
+          }
+        } catch (_parseErr) {
+          // If generated_jobs is malformed in an active run, preserve
+          return true;
+        }
+      }
+
+      // 6. Check if any generation_checkpoints for this job are in running/pending state
+      if (jobId) {
+        const activeCheckpoints = await this.getAllRows(
+          "SELECT stage FROM generation_checkpoints WHERE job_id = ? AND status IN ('running', 'pending')",
+          [jobId]
+        );
+        if (activeCheckpoints.length > 0) return true;
+      }
+
+      return false;
+    } catch (err) {
+      // Uncertainty / database error -> always preserve
+      this.logger?.warn?.(`isProductionActiveOrRecoverable error: ${err.message}`);
+      return true;
+    }
+  }
+
   async createMediaGenerationTask(input = {}) {
     const id = this.generateId('media');
     await this.executeQuery(
@@ -1366,16 +1493,20 @@ class Database {
     };
   }
 
-  async markInterruptedJobs() {
+  async markInterruptedJobs(customReason = null) {
+    const jobError = customReason || 'The application restarted before this job finished';
+    const runError = customReason || 'The application restarted before this operator run finished';
     await this.executeQuery(
       `UPDATE generation_jobs SET status = 'interrupted',
-       error = 'The application restarted before this job finished', updated_at = datetime('now'),
-       completed_at = datetime('now') WHERE status IN ('queued', 'running')`
+       error = ?, updated_at = datetime('now'),
+       completed_at = datetime('now') WHERE status IN ('queued', 'running')`,
+      [jobError]
     );
     await this.executeQuery(
       `UPDATE operator_runs SET status = 'interrupted', stage = 'interrupted',
-       error = 'The application restarted before this operator run finished', updated_at = datetime('now'),
-       completed_at = datetime('now') WHERE status IN ('queued', 'running', 'cancelling')`
+       error = ?, updated_at = datetime('now'),
+       completed_at = datetime('now') WHERE status IN ('queued', 'running', 'cancelling')`,
+      [runError]
     );
   }
 
@@ -1832,11 +1963,27 @@ class Database {
     };
   }
 
-  async getPublishQueue() {
+  async getPublishQueue(options = {}) {
+    const { includeFutureRetries = false } = options;
+    const retryClause = includeFutureRetries
+      ? "status = 'retry_pending'"
+      : "(status = 'retry_pending' AND datetime(publish_time) <= datetime('now'))";
+
     const rows = await this.getAllRows(
       `SELECT * FROM publish_schedule
-       WHERE status IN ('scheduled', 'paused')
+       WHERE status IN ('scheduled', 'paused', 'reconciliation_required')
+          OR ${retryClause}
        ORDER BY publish_time ASC`
+    );
+
+    return rows.map(row => this.deserializeScheduleEntry(row));
+  }
+
+  async getDeadLetterEntries() {
+    const rows = await this.getAllRows(
+      `SELECT * FROM publish_schedule
+       WHERE status = 'dead_letter'
+       ORDER BY created_at DESC`
     );
 
     return rows.map(row => this.deserializeScheduleEntry(row));
@@ -2289,6 +2436,27 @@ class Database {
     }));
   }
 
+  async cleanOldExperimentSamples(retentionDays = 14) {
+    const days = Math.max(14, Number(retentionDays) || 14);
+    const cutoffDate = new Date(Date.now() - (days * 24 * 60 * 60 * 1000));
+    const cutoffIso = cutoffDate.toISOString();
+
+    const result = await this.executeQuery(
+      `DELETE FROM experiment_samples 
+       WHERE experiment_id IN (
+         SELECT id FROM growth_experiments 
+         WHERE status IN ('adopted', 'inconclusive', 'cancelled')
+       )
+       AND (captured_at < ? OR (captured_at IS NULL AND created_at < ?))`,
+      [cutoffIso, cutoffIso]
+    );
+
+    return {
+      deletedCount: result?.changes || 0,
+      cutoffDate: cutoffIso
+    };
+  }
+
   parseExperimentArm(row) {
     if (!row) return null;
     return {
@@ -2710,6 +2878,16 @@ class Database {
 
   // Keyword performance
   async updateKeywordPerformance(keyword, views, videoId) {
+    let viewCount = views;
+    let vidId = videoId;
+    let score = null;
+    if (typeof views === 'object' && views !== null) {
+      viewCount = views.views ?? views.total_views ?? 0;
+      vidId = views.videoId ?? views.best_performing_video ?? videoId;
+      score = views.score ?? views.performance_score ?? null;
+    }
+    viewCount = Number(viewCount) || 0;
+
     const existing = await this.getRow(
       'SELECT * FROM keyword_performance WHERE keyword = ?',
       [keyword]
@@ -2727,24 +2905,76 @@ class Database {
           END,
           last_used = datetime('now')
         WHERE keyword = ?`,
-        [views, views, views, videoId, keyword]
+        [viewCount, viewCount, viewCount, vidId, keyword]
       );
     } else {
+      const id = 'kw_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
+      const perfScore = score !== null ? Number(score) : Math.min(100, viewCount / 1000);
       await this.executeQuery(
         `INSERT INTO keyword_performance (
-          keyword, total_uses, total_views, average_views,
+          id, keyword, total_uses, total_views, average_views,
           best_performing_video, last_used, performance_score
-        ) VALUES (?, 1, ?, ?, ?, datetime('now'), ?)`,
-        [keyword, views, views, videoId, Math.min(100, views / 1000)]
+        ) VALUES (?, ?, 1, ?, ?, ?, datetime('now'), ?)`,
+        [id, keyword, viewCount, viewCount, vidId, perfScore]
       );
     }
   }
 
   async getKeywordHistory() {
-    const rows = await this.getAllRows(
-      'SELECT * FROM keyword_performance ORDER BY performance_score DESC'
+    return this.getAllRows(
+      'SELECT * FROM keyword_performance ORDER BY average_views DESC'
     );
-    return rows;
+  }
+
+  async getKeywordPerformance(options = {}) {
+    let query = 'SELECT * FROM keyword_performance';
+    const params = [];
+
+    if (options.keyword) {
+      query += ' WHERE keyword = ?';
+      params.push(options.keyword);
+    } else if (options.keywords && Array.isArray(options.keywords) && options.keywords.length > 0) {
+      const placeholders = options.keywords.map(() => '?').join(', ');
+      query += ` WHERE keyword IN (${placeholders})`;
+      params.push(...options.keywords.map(k => String(k).toLowerCase()));
+    }
+
+    const orderBy = options.orderBy || 'average_views';
+    const orderDirection = options.orderDirection || 'DESC';
+    query += ` ORDER BY ${orderBy} ${orderDirection}`;
+
+    if (options.limit && Number(options.limit) > 0) {
+      query += ' LIMIT ?';
+      params.push(options.limit);
+    }
+
+    return this.getAllRows(query, params);
+  }
+
+  async getKeywordBaseline() {
+    const row = await this.getRow(
+      `SELECT 
+        COUNT(*) AS total_keywords,
+        COALESCE(SUM(total_uses), 0) AS total_uses,
+        COALESCE(SUM(total_views), 0) AS total_views,
+        COALESCE(AVG(average_views), 0) AS average_views
+       FROM keyword_performance`
+    );
+    if (!row || Number(row.total_keywords) === 0) {
+      return { totalKeywords: 0, totalUses: 0, totalViews: 0, baselineViews: 0, baselineAverageViews: 0 };
+    }
+    const totalUses = Number(row.total_uses) || 0;
+    const totalViews = Number(row.total_views) || 0;
+    const baselineAverageViews = totalUses > 0
+      ? Math.round(totalViews / totalUses)
+      : Math.round(Number(row.average_views) || 0);
+    return {
+      totalKeywords: Number(row.total_keywords),
+      totalUses,
+      totalViews,
+      baselineViews: baselineAverageViews,
+      baselineAverageViews
+    };
   }
 
   // Settings
@@ -2914,6 +3144,195 @@ class Database {
     } catch (error) {
       return 'Unknown';
     }
+  }
+
+  // =========================================================================
+  // Phase 7: Autonomous Daily Shorts Publications
+  // =========================================================================
+
+  static get DAILY_SHORT_STATUSES() {
+    return [
+      'IDEA',
+      'RESEARCHING',
+      'SCRIPTED',
+      'PRODUCING',
+      'QA_PENDING',
+      'QA_FAILED',
+      'READY_TO_PUBLISH',
+      'UPLOADING',
+      'UPLOAD_FAILED',
+      'SCHEDULED',
+      'PUBLISHED',
+      'REJECTED'
+    ];
+  }
+
+  async saveDailyShortPublication(record) {
+    if (!record || !record.production_id) {
+      throw new Error('production_id is required to save daily short publication');
+    }
+    const status = record.status || 'IDEA';
+    const allowed = Database.DAILY_SHORT_STATUSES;
+    if (!allowed.includes(status)) {
+      throw new Error(`Invalid daily short publication status: ${status}. Must be one of: ${allowed.join(', ')}`);
+    }
+
+    const query = `
+      INSERT INTO daily_shorts_publications (
+        production_id, topic, video_path, cover_path, title, description,
+        content_hash, status, qa_status, youtube_status, youtube_video_id,
+        scheduled_at, published_at, upload_attempts, last_error, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(production_id) DO UPDATE SET
+        topic = excluded.topic,
+        video_path = COALESCE(excluded.video_path, daily_shorts_publications.video_path),
+        cover_path = COALESCE(excluded.cover_path, daily_shorts_publications.cover_path),
+        title = excluded.title,
+        description = COALESCE(excluded.description, daily_shorts_publications.description),
+        content_hash = COALESCE(excluded.content_hash, daily_shorts_publications.content_hash),
+        status = excluded.status,
+        qa_status = COALESCE(excluded.qa_status, daily_shorts_publications.qa_status),
+        youtube_status = COALESCE(excluded.youtube_status, daily_shorts_publications.youtube_status),
+        youtube_video_id = COALESCE(excluded.youtube_video_id, daily_shorts_publications.youtube_video_id),
+        scheduled_at = COALESCE(excluded.scheduled_at, daily_shorts_publications.scheduled_at),
+        published_at = COALESCE(excluded.published_at, daily_shorts_publications.published_at),
+        upload_attempts = COALESCE(excluded.upload_attempts, daily_shorts_publications.upload_attempts),
+        last_error = excluded.last_error,
+        updated_at = CURRENT_TIMESTAMP
+    `;
+
+    const now = new Date().toISOString();
+    await this.executeQuery(query, [
+      record.production_id,
+      record.topic,
+      record.video_path || null,
+      record.cover_path || null,
+      record.title || record.topic,
+      record.description || null,
+      record.content_hash || null,
+      status,
+      record.qa_status || 'PENDING',
+      record.youtube_status || 'UNPUBLISHED',
+      record.youtube_video_id || null,
+      record.scheduled_at || null,
+      record.published_at || null,
+      record.upload_attempts || 0,
+      record.last_error || null,
+      record.created_at || now,
+      record.updated_at || now
+    ]);
+
+    return this.getDailyShortPublication(record.production_id);
+  }
+
+  async updateDailyShortPublication(productionId, updates = {}) {
+    if (!productionId) throw new Error('productionId is required');
+
+    if (updates.status) {
+      const allowed = Database.DAILY_SHORT_STATUSES;
+      if (!allowed.includes(updates.status)) {
+        throw new Error(`Invalid status: ${updates.status}. Must be one of: ${allowed.join(', ')}`);
+      }
+    }
+
+    const fields = [];
+    const params = [];
+
+    const allowedFields = [
+      'topic', 'video_path', 'cover_path', 'title', 'description',
+      'content_hash', 'status', 'qa_status', 'youtube_status',
+      'youtube_video_id', 'scheduled_at', 'published_at',
+      'upload_attempts', 'last_error'
+    ];
+
+    for (const key of allowedFields) {
+      if (updates[key] !== undefined) {
+        fields.push(`${key} = ?`);
+        params.push(updates[key]);
+      }
+    }
+
+    if (fields.length === 0) {
+      return this.getDailyShortPublication(productionId);
+    }
+
+    fields.push('updated_at = CURRENT_TIMESTAMP');
+    params.push(productionId);
+
+    const query = `UPDATE daily_shorts_publications SET ${fields.join(', ')} WHERE production_id = ?`;
+    await this.executeQuery(query, params);
+
+    return this.getDailyShortPublication(productionId);
+  }
+
+  async getDailyShortPublication(productionId) {
+    return this.getRow(
+      'SELECT * FROM daily_shorts_publications WHERE production_id = ?',
+      [productionId]
+    );
+  }
+
+  async getDailyShortsByDate(dateStr) {
+    // dateStr format: YYYY-MM-DD
+    const targetDate = String(dateStr || '').slice(0, 10);
+    return this.getAllRows(
+      `SELECT * FROM daily_shorts_publications
+       WHERE strftime('%Y-%m-%d', published_at) = ?
+          OR strftime('%Y-%m-%d', scheduled_at) = ?
+          OR strftime('%Y-%m-%d', created_at) = ?
+       ORDER BY created_at DESC`,
+      [targetDate, targetDate, targetDate]
+    );
+  }
+
+  async getLatestDailyShort(statusFilter = null) {
+    if (statusFilter) {
+      return this.getRow(
+        'SELECT * FROM daily_shorts_publications WHERE status = ? ORDER BY created_at DESC LIMIT 1',
+        [statusFilter]
+      );
+    }
+    return this.getRow(
+      'SELECT * FROM daily_shorts_publications ORDER BY created_at DESC LIMIT 1'
+    );
+  }
+
+  async listDailyShortPublications(options = {}) {
+    const limit = Number(options.limit || 50);
+    if (options.status) {
+      return this.getAllRows(
+        'SELECT * FROM daily_shorts_publications WHERE status = ? ORDER BY created_at DESC LIMIT ?',
+        [options.status, limit]
+      );
+    }
+    return this.getAllRows(
+      'SELECT * FROM daily_shorts_publications ORDER BY created_at DESC LIMIT ?',
+      [limit]
+    );
+  }
+
+  async isDailyShortTopicDuplicate(topic, lookbackDays = 90) {
+    if (!topic || typeof topic !== 'string') return false;
+    const normalized = topic.trim().toLowerCase();
+    const rows = await this.getAllRows(
+      `SELECT topic FROM daily_shorts_publications
+       WHERE status IN ('READY_TO_PUBLISH', 'UPLOADING', 'SCHEDULED', 'PUBLISHED')
+         AND datetime(created_at) >= datetime('now', '-' || ? || ' days')`,
+      [Math.max(1, lookbackDays)]
+    );
+
+    return rows.some(r => r.topic && r.topic.trim().toLowerCase() === normalized);
+  }
+
+  async isDailyShortContentHashDuplicate(hash) {
+    if (!hash) return false;
+    const row = await this.getRow(
+      `SELECT production_id FROM daily_shorts_publications
+       WHERE content_hash = ? AND status IN ('READY_TO_PUBLISH', 'UPLOADING', 'SCHEDULED', 'PUBLISHED')
+       LIMIT 1`,
+      [hash]
+    );
+    return Boolean(row);
   }
 }
 

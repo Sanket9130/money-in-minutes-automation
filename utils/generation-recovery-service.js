@@ -1,4 +1,5 @@
 const fs = require('fs').promises;
+const path = require('path');
 
 const GENERATION_STAGES = [
   'strategy',
@@ -40,8 +41,10 @@ class GenerationRecoveryService {
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       await this.updateJobStage(jobId, stage, progress, { attempt });
       const startedAt = new Date().toISOString();
+      const existing = await this.db.getGenerationCheckpoint(jobId, stage);
       await this.db.saveGenerationCheckpoint(jobId, stage, {
         status: 'running',
+        artifact: existing?.artifact || null,
         error: null,
         startedAt,
         completedAt: null,
@@ -61,8 +64,10 @@ class GenerationRecoveryService {
         return artifact;
       } catch (error) {
         lastError = error;
+        const currentCheckpoint = await this.db.getGenerationCheckpoint(jobId, stage);
         await this.db.saveGenerationCheckpoint(jobId, stage, {
           status: error.code === 'JOB_CANCELLED' ? 'cancelled' : 'failed',
+          artifact: currentCheckpoint?.artifact || null,
           error: error.message,
           completedAt: new Date().toISOString()
         });
@@ -83,7 +88,14 @@ class GenerationRecoveryService {
     if (stage === 'seo') return Boolean(artifact.title && artifact.description && Array.isArray(artifact.tags));
     if (stage === 'production') {
       const finalVideo = artifact.assets?.finalVideo;
-      return Boolean(artifact.id && finalVideo?.path && await this.pathExists(finalVideo.path));
+      if (!artifact.id || !finalVideo?.path) return false;
+      if (finalVideo.simulated === true) return false;
+      const lower = String(finalVideo.path).toLowerCase();
+      const invalidExtensions = ['.assembly.json', '.info', '.placeholder'];
+      if (invalidExtensions.some(ext => lower.endsWith(ext))) return false;
+      const ext = path.extname(lower);
+      if (!['.mp4', '.mov', '.mkv', '.webm'].includes(ext)) return false;
+      return Boolean(await this.pathExists(finalVideo.path));
     }
     if (stage === 'quality_review') return Boolean(artifact.contentId && artifact.reviewStatus);
     return false;
@@ -103,6 +115,10 @@ class GenerationRecoveryService {
   }
 
   isRetryable(error) {
+    if (!error) return false;
+    if (error.retryable === true) return true;
+    const msg = String(error.message || '');
+    if (msg.includes('incomplete or missing artifact') || msg.includes('placeholder/simulated')) return true;
     const status = Number(error.status || error.statusCode || error.response?.status || 0);
     if ([408, 425, 429].includes(status) || status >= 500) return true;
     const code = String(error.code || '').toUpperCase();
@@ -124,6 +140,15 @@ class GenerationRecoveryService {
     if (!GENERATION_STAGES.includes(requestedStage)) throw new Error('Resume stage is not supported');
     const index = GENERATION_STAGES.indexOf(requestedStage);
     await this.db.deleteGenerationCheckpoints(jobId, GENERATION_STAGES.slice(index));
+  }
+
+  async getProductionManifest(jobId) {
+    if (!jobId || !this.db?.getGenerationCheckpoint) return null;
+    const checkpoint = await this.db.getGenerationCheckpoint(jobId, 'production');
+    if (checkpoint?.artifact?.productionManifest?.substages) {
+      return checkpoint.artifact.productionManifest;
+    }
+    return checkpoint?.artifact?.substages ? checkpoint.artifact : null;
   }
 }
 

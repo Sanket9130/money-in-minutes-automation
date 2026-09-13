@@ -45,14 +45,140 @@ class ScriptWriterAgent {
     };
   }
 
+  extractApplicableContentDNA(strategy = {}) {
+    const dna = strategy?.contentDNA;
+    if (!dna || typeof dna !== 'object') return null;
+
+    // 0 samples or 1-2 samples: no DNA influence
+    const sampleCount = Number(dna.sampleCount ?? 0);
+    if (sampleCount < 3) return null;
+
+    // Confidence check: must be medium or high
+    const rawLevel = typeof dna.confidence === 'object'
+      ? dna.confidence?.level
+      : dna.confidence;
+    const confidence = String(rawLevel || '').toLowerCase();
+    if (!['medium', 'high'].includes(confidence)) return null;
+
+    const dominantHook = dna.dominantHookPatterns || dna.hookPattern;
+    const dominantPacing = dna.dominantPacingPatterns || dna.pacingPattern;
+    const dominantVisual = dna.dominantVisualPatterns || dna.visualDensityPattern;
+
+    if (!dominantHook && !dominantPacing) return null;
+
+    const hookTypes = ['question', 'statistic', 'statement', 'challenge', 'promise'];
+    let preferredHookType = dominantHook?.preferredType || dominantHook?.hookType || null;
+    if (preferredHookType && !hookTypes.includes(preferredHookType.toLowerCase())) {
+      preferredHookType = null;
+    }
+
+    const preferredHookLength = dominantHook?.preferredLength || dominantHook?.pacingStyle || null;
+    const averageHookDuration = Number.isFinite(dominantHook?.averageHookDuration)
+      ? dominantHook.averageHookDuration
+      : dominantHook?.hookDurationSeconds || null;
+    const averageHookWordCount = Number.isFinite(dominantHook?.averageHookWordCount)
+      ? dominantHook.averageHookWordCount
+      : dominantHook?.hookWordCount || null;
+
+    const preferredPacing = dominantPacing?.preferredPacing || dominantPacing?.pacing || null;
+    const averageSceneDuration = Number.isFinite(dominantPacing?.averageSceneDuration)
+      ? dominantPacing.averageSceneDuration
+      : null;
+    const averageSceneCount = Number.isFinite(dominantPacing?.averageSceneCount)
+      ? dominantPacing.averageSceneCount
+      : dominantPacing?.sceneCount || null;
+
+    const preferredDensityLevel = dominantVisual?.preferredDensityLevel || dominantVisual?.densityLevel || null;
+
+    return {
+      confidence,
+      sampleCount,
+      preferredHookType,
+      preferredHookLength,
+      averageHookDuration,
+      averageHookWordCount,
+      preferredPacing,
+      averageSceneDuration,
+      averageSceneCount,
+      preferredDensityLevel
+    };
+  }
+
+  getDNANonApplicationReason(strategy = {}) {
+    const dna = strategy?.contentDNA;
+    if (!dna) return 'no_dna_profile';
+    if (typeof dna !== 'object') return 'malformed_dna';
+    const sampleCount = Number(dna.sampleCount ?? 0);
+    if (sampleCount < 3) return 'insufficient_samples';
+    const rawLevel = typeof dna.confidence === 'object' ? dna.confidence?.level : dna.confidence;
+    const confidence = String(rawLevel || '').toLowerCase();
+    if (!['medium', 'high'].includes(confidence)) return 'low_confidence';
+    return 'not_applicable';
+  }
+
+  buildDNAGuidancePrompt(appliedDNA) {
+    if (!appliedDNA) return '';
+
+    const isHighConfidence = appliedDNA.confidence === 'high';
+    const guidelines = [];
+
+    if (appliedDNA.preferredHookType) {
+      const verb = isHighConfidence ? 'strongly favor' : 'consider';
+      let hookDesc = `${verb} an engaging ${appliedDNA.preferredHookType} hook`;
+      if (appliedDNA.preferredHookLength === 'concise' || (appliedDNA.averageHookWordCount && appliedDNA.averageHookWordCount <= 40)) {
+        hookDesc += ' (concise, under 15-20 words)';
+      } else if (appliedDNA.preferredHookLength === 'extended') {
+        hookDesc += ' (context-rich)';
+      }
+      guidelines.push(`- Hook guideline: ${hookDesc}.`);
+    }
+
+    if (appliedDNA.preferredPacing || appliedDNA.averageSceneDuration) {
+      const pacingStyle = appliedDNA.preferredPacing || 'moderate';
+      const sceneDur = appliedDNA.averageSceneDuration
+        ? ` (~${Math.round(appliedDNA.averageSceneDuration)}s per scene)`
+        : '';
+      guidelines.push(`- Rhythm & pacing guideline: ${pacingStyle} pacing${sceneDur}.`);
+    }
+
+    if (appliedDNA.preferredDensityLevel && appliedDNA.preferredDensityLevel !== 'unknown') {
+      guidelines.push(`- Visual structure guideline: structure sections to support ${appliedDNA.preferredDensityLevel} visual density.`);
+    }
+
+    if (!guidelines.length) return '';
+
+    return `\nLearned Content DNA creative/structural guidelines (apply as stylistic/structural guidance only; NEVER use as factual claims, data, or evidence):
+${guidelines.join('\n')}\n`;
+  }
+
   async generateScript(strategy) {
     try {
       this.logger.info(`Generating script for: ${strategy.topic}`);
       
+      const appliedDNA = this.extractApplicableContentDNA(strategy);
       const template = this.templates[strategy.contentType.toLowerCase()] || this.templates.explainer;
-      const aiScript = await this.generateScriptWithAI(strategy, template);
+      const aiScript = await this.generateScriptWithAI(strategy, template, appliedDNA);
       if (aiScript) {
         aiScript.fullScript = this.formatFullScript(aiScript);
+        aiScript.metadata = aiScript.metadata || {};
+        aiScript.metadata.appliedDNA = appliedDNA
+          ? {
+              applied: true,
+              confidence: appliedDNA.confidence,
+              sampleCount: appliedDNA.sampleCount,
+              guidelines: {
+                hookType: appliedDNA.preferredHookType || null,
+                hookLength: appliedDNA.preferredHookLength || null,
+                pacing: appliedDNA.preferredPacing || null,
+                sceneDuration: appliedDNA.averageSceneDuration || null
+              },
+              isFactualVerification: false
+            }
+          : {
+              applied: false,
+              reason: this.getDNANonApplicationReason(strategy),
+              isFactualVerification: false
+            };
         await this.db.saveScript(aiScript);
         this.logger.info(`Script generated with AI provider: ${aiScript.title}`);
         return aiScript;
@@ -60,7 +186,7 @@ class ScriptWriterAgent {
       
       this.logger.info('Using template script generation');
       // Generate script components
-      const hook = await this.generateHook(strategy);
+      const hook = await this.generateHook(strategy, appliedDNA);
       const introduction = await this.generateIntroduction(strategy);
       const mainContent = await this.generateMainContent(strategy, template);
       const conclusion = await this.generateConclusion(strategy);
@@ -76,13 +202,31 @@ class ScriptWriterAgent {
         callToAction: cta,
         duration: this.estimateDuration(mainContent),
         tone: template.tone,
-        pacing: template.pacing,
-        keywords: strategy.keywords,
+        pacing: appliedDNA?.preferredPacing || template.pacing,
+        keywords: strategy.keywords || [],
         claims: [],
         metadata: {
           strategy: strategy,
           generatedAt: new Date().toISOString(),
-          version: '1.0'
+          version: '1.0',
+          appliedDNA: appliedDNA
+            ? {
+                applied: true,
+                confidence: appliedDNA.confidence,
+                sampleCount: appliedDNA.sampleCount,
+                guidelines: {
+                  hookType: appliedDNA.preferredHookType || null,
+                  hookLength: appliedDNA.preferredHookLength || null,
+                  pacing: appliedDNA.preferredPacing || null,
+                  sceneDuration: appliedDNA.averageSceneDuration || null
+                },
+                isFactualVerification: false
+              }
+            : {
+                applied: false,
+                reason: this.getDNANonApplicationReason(strategy),
+                isFactualVerification: false
+              }
         }
       };
 
@@ -100,42 +244,264 @@ class ScriptWriterAgent {
     }
   }
 
-  async generateScriptWithAI(strategy, template) {
+  validateShortsHook(hookInput) {
+    const text = typeof hookInput === 'object' && hookInput !== null
+      ? (hookInput.text || '')
+      : String(hookInput || '');
+    const cleanText = text.trim();
+
+    if (!cleanText) {
+      this.logger?.warn?.('Shorts hook validation: Hook text is empty');
+      return { isValid: false, reason: 'EMPTY_HOOK' };
+    }
+
+    const genericIntros = [
+      /^have you ever wondered/i,
+      /^did you know/i,
+      /^[a-z0-9\s]+ is about to change everything/i,
+      /^in this video/i,
+      /^today we are/i,
+      /^welcome back/i
+    ];
+
+    const isGenericIntro = genericIntros.some(pattern => pattern.test(cleanText));
+    const hasDollar = /\$\s*\d+/i.test(cleanText);
+    const hasPercent = /\d+\s*%/i.test(cleanText);
+    const hasNumber = /\b\d+[\d,.]*\b/.test(cleanText);
+    const hasSpecificTrigger = /(waste|drain|cost|lose|secret|trap|mistake|hidden|stop|paying|audit|refund|save|perceive|actual)/i.test(cleanText);
+
+    const hasSpecificity = hasDollar || hasPercent || (hasNumber && hasSpecificTrigger) || (cleanText.length <= 120 && hasSpecificTrigger);
+
+    if (isGenericIntro || !hasSpecificity) {
+      this.logger?.warn?.(`Shorts hook lacks concrete curiosity/stakes: "${cleanText.slice(0, 60)}..."`);
+      return {
+        isValid: false,
+        reason: isGenericIntro ? 'GENERIC_INTRO' : 'LACKS_SPECIFICITY',
+        suggestion: 'Include a specific dollar amount, percentage, or concrete relatable mistake in the first 3 seconds.'
+      };
+    }
+
+    return { isValid: true };
+  }
+
+  buildShortsSceneList(shortsScript, options = {}) {
+    if (!shortsScript) return [];
+
+    // Support 10-14 granular visual beats for premium Shorts
+    if (Array.isArray(shortsScript.beats) && shortsScript.beats.length > 0) {
+      const scenes = shortsScript.beats.map((beat, idx) => ({
+        id: beat.id || `beat_${idx + 1}`,
+        beat: beat.beat || beat.id || `beat_${idx + 1}`,
+        sceneType: beat.sceneType || (beat.isPresenter ? 'presenter' : 'broll'),
+        label: beat.label || `Scene ${idx + 1}`,
+        scriptText: beat.scriptText || beat.text || '',
+        duration: Math.max(1.5, Number(beat.duration || beat.durationSeconds || 3)),
+        isPresenter: Boolean(beat.isPresenter),
+        character: beat.character || shortsScript.character || null,
+        assetPath: beat.assetPath || null,
+        brollKeywords: beat.brollKeywords || beat.keywords || [],
+        verifiedData: beat.verifiedData || null,
+        treatment: beat.treatment || null,
+        motion: beat.motion || null,
+        isHook: idx === 0 || Boolean(beat.isHook),
+        isCTA: idx === shortsScript.beats.length - 1 || Boolean(beat.isCTA)
+      }));
+
+      // Scale durations to totalDuration if provided
+      if (options.totalDuration && options.totalDuration > 0 && scenes.length > 0) {
+        const currentSum = scenes.reduce((sum, s) => sum + s.duration, 0);
+        if (currentSum > 0) {
+          const ratio = options.totalDuration / currentSum;
+          scenes.forEach(s => {
+            s.duration = Math.max(1.5, Number((s.duration * ratio).toFixed(2)));
+          });
+        }
+      }
+      return scenes;
+    }
+
+    const scenes = [];
+    const hookObj = shortsScript.hook;
+    const hookText = typeof hookObj === 'object' ? (hookObj.text || hookObj.scriptText || '') : String(hookObj || '');
+
+    if (hookText) {
+      scenes.push({
+        id: 'hook',
+        beat: 'hook',
+        sceneType: 'hook',
+        label: 'Must Watch',
+        scriptText: hookText,
+        duration: Math.max(3, parseInt(hookObj?.durationSeconds || hookObj?.duration, 10) || 4),
+        isHook: true
+      });
+    }
+
+    const storyBeats = [
+      { key: 'curiosityGap', label: 'The Hidden Truth', defaultDur: 5, id: 'curiosity_gap' },
+      { key: 'dataReveal', label: 'Key Data', defaultDur: 7, id: 'data_reveal' },
+      { key: 'escalation', label: 'The Real Cost', defaultDur: 7, id: 'escalation' },
+      { key: 'payoff', label: '10-Year Impact', defaultDur: 7, id: 'payoff' }
+    ];
+
+    let hasStoryBeats = false;
+    for (const beat of storyBeats) {
+      const beatVal = shortsScript[beat.key] || shortsScript.shortsStory?.[beat.key];
+      if (beatVal) {
+        hasStoryBeats = true;
+        let scriptText = '';
+        let verifiedData = null;
+
+        if (typeof beatVal === 'string') {
+          scriptText = beatVal;
+        } else if (Array.isArray(beatVal)) {
+          scriptText = beatVal.filter(l => typeof l === 'string').join(' ');
+        } else if (typeof beatVal === 'object') {
+          scriptText = beatVal.text || beatVal.scriptText || beatVal.content || '';
+          if (beatVal.verifiedData) {
+            verifiedData = beatVal.verifiedData;
+          } else if (beatVal.metric) {
+            verifiedData = {
+              verified: true,
+              type: 'statistic',
+              value: beatVal.metric,
+              label: beat.label,
+              source: beatVal.source || 'Verified Financial Data'
+            };
+          } else if (beatVal.comparison) {
+            const leftVal = beatVal.comparison.perceived || beatVal.comparison.left || '$86 / MO';
+            const rightVal = beatVal.comparison.actual || beatVal.comparison.right || '$219 / MO';
+            verifiedData = {
+              verified: true,
+              type: 'comparison',
+              left: { label: 'ESTIMATED', value: leftVal },
+              right: { label: 'ACTUAL', value: rightVal },
+              label: beat.label,
+              source: beatVal.source || beatVal.comparison.source || 'Verified Financial Data'
+            };
+          } else if (beatVal.takeaway) {
+            const match = String(beatVal.takeaway).match(/\$[\d,]+(?:\.\d+)?(?:[kKmMbB]|(?:\/mo))?/);
+            verifiedData = {
+              verified: true,
+              type: 'statistic',
+              value: match ? match[0] : String(beatVal.takeaway),
+              label: beat.label,
+              source: beatVal.source || 'Compound Wealth Analysis'
+            };
+          }
+        }
+
+        const dur = (typeof beatVal === 'object' && beatVal.durationSeconds)
+          ? Number(beatVal.durationSeconds)
+          : beat.defaultDur;
+
+        scenes.push({
+          id: beat.id,
+          beat: beat.key,
+          sceneType: beat.id,
+          label: beat.label,
+          scriptText: scriptText || beat.label,
+          duration: Math.max(3, dur),
+          verifiedData
+        });
+      }
+    }
+
+    if (!hasStoryBeats && Array.isArray(shortsScript.mainContent?.sections)) {
+      shortsScript.mainContent.sections.forEach((section, idx) => {
+        let text = '';
+        if (Array.isArray(section.content)) text = section.content.filter(l => typeof l === 'string' && !l.startsWith('[')).join(' ');
+        else if (typeof section.content === 'string') text = section.content;
+        else if (section.summary) text = section.summary;
+
+        scenes.push({
+          id: `section_${idx + 1}`,
+          beat: `section_${idx + 1}`,
+          sceneType: `section_${idx + 1}`,
+          label: section.title || `Beat ${idx + 1}`,
+          scriptText: text || section.title || `Beat ${idx + 1}`,
+          duration: Math.max(3, section.duration || 6)
+        });
+      });
+    }
+
+    const ctaVal = shortsScript.callToAction?.subscribe || shortsScript.cta || '';
+    const ctaText = typeof ctaVal === 'object' ? (ctaVal.text || ctaVal.actionText || '') : String(ctaVal || '');
+    if (ctaText) {
+      scenes.push({
+        id: 'cta',
+        beat: 'cta',
+        sceneType: 'cta',
+        label: 'Action',
+        scriptText: ctaText,
+        duration: Math.max(3, parseInt(ctaVal?.durationSeconds || ctaVal?.duration, 10) || 4),
+        isCTA: true
+      });
+    }
+
+    // Scale durations to totalDuration if provided
+    if (options.totalDuration && options.totalDuration > 0 && scenes.length > 0) {
+      const currentSum = scenes.reduce((sum, s) => sum + s.duration, 0);
+      if (currentSum > 0) {
+        const ratio = options.totalDuration / currentSum;
+        scenes.forEach(s => {
+          s.duration = Math.max(2.5, Number((s.duration * ratio).toFixed(2)));
+        });
+      }
+    }
+
+    return scenes;
+  }
+
+  async generateScriptWithAI(strategy, template, appliedDNA = null) {
     if (!this.aiTextService.isAvailable()) {
       this.logger.info('Using template script generation because no AI text provider is configured');
       return null;
     }
 
-    const prompt = `You are writing a YouTube script plan.
+    const dnaGuidanceBlock = this.buildDNAGuidancePrompt(appliedDNA);
+
+    const prompt = `You are writing a high-retention YouTube Shorts script (30-45 seconds total, maximum 90 spoken words).
+The narrative MUST follow the retention arc: HOOK → CURIOSITY GAP → DATA REVEAL → ESCALATION → PAYOFF → CTA.
+Do NOT include generic boilerplate like "Hey everyone, welcome back" or "In this video".
+The hook MUST create an immediate open loop with a specific dollar amount, percentage, or relatable financial shock.
+The payoff MUST directly resolve the curiosity loop set by the hook.
+
 Return only valid JSON with this exact shape:
 {
-  "title": "compelling title under 100 characters",
-  "hook": "opening hook in one sentence",
+  "title": "compelling punchy title under 60 characters #Shorts",
+  "hook": "shocking opening hook with specific dollar/number/stakes (under 15 words)",
+  "curiosityGap": "surprising stat or hidden reality that creates tension (1-2 sentences)",
+  "dataReveal": "the concrete numbers or financial contrast (e.g. $10/mo vs $26,000)",
+  "escalation": "the reason why or hidden catch that makes it urgent (1-2 sentences)",
+  "payoff": "the solution, reversal, or concrete result answering the hook (1-2 sentences)",
+  "cta": "punchy 1-sentence action (under 12 words)",
   "sections": [
-    { "title": "section title", "content": ["spoken script bullet"], "duration": 60 }
+    { "title": "Curiosity Gap", "content": ["spoken curiosity text"], "duration": 5 },
+    { "title": "Key Data", "content": ["spoken data reveal text"], "duration": 7 },
+    { "title": "Escalation", "content": ["spoken escalation text"], "duration": 7 },
+    { "title": "The Payoff", "content": ["spoken payoff text"], "duration": 7 }
   ],
-  "cta": "clear call to action",
   "claims": [
     { "text": "specific factual claim a reviewer must verify", "riskLevel": "standard|high", "sourceUrls": ["exact supplied source URL"] }
   ]
 }
 
 Topic: ${strategy.topic}
-Style/content type: ${strategy.contentType}
+Style/content type: ${strategy.contentType || 'story'}
 Angle: ${strategy.angle}
 Target audience: ${strategy.targetAudience}
-Desired length: ${strategy.requestedLength || process.env.DEFAULT_VIDEO_LENGTH || '8-12 minutes'}
+Desired length: 30-45 seconds (Shorts)
 Tone: ${template.tone}
-Pacing: ${template.pacing}
-Brand voice: ${strategy.brandVoice || 'clear, credible, and engaging'}
+Pacing: fast-paced, high retention
+Brand voice: ${strategy.brandVoice || 'punchy, authentic, data-backed'}
 Channel goal: ${strategy.channelGoal || 'help the viewer understand and act'}
 Channel value proposition: ${strategy.channelValueProposition || 'give the viewer practical value'}
 Editorial rationale: ${strategy.planRationale || 'fit the selected topic and audience'}
 Channel constraints: ${strategy.channelConstraints || 'none beyond the factual-safety rules below'}
-Preferred call to action: ${strategy.callToAction || 'invite the viewer to subscribe'}
+Preferred call to action: ${strategy.callToAction || 'punchy 1-sentence prompt'}
 Keywords: ${(strategy.keywords || []).join(', ')}
 Research sources: ${JSON.stringify(strategy.researchSources || [])}
-Avoid fabricated statistics, unsupported claims, and fake urgency. List every externally verifiable factual claim in claims. Use only exact URLs from Research sources; use an empty sourceUrls array when the supplied sources do not support a claim.`;
+${dnaGuidanceBlock}Avoid fabricated statistics, unsupported claims, and fake urgency. List every externally verifiable factual claim in claims. Use only exact URLs from Research sources; use an empty sourceUrls array when the supplied sources do not support a claim.`;
 
     try {
       const response = await this.aiTextService.generateText(prompt, {
@@ -143,16 +509,40 @@ Avoid fabricated statistics, unsupported claims, and fake urgency. List every ex
         temperature: 0.7
       });
       const parsed = this.parseAIJsonResponse(response);
-      const sections = this.normalizeAISections(parsed.sections, strategy);
 
-      if (!parsed.title || !parsed.hook || sections.length === 0) {
+      if (!parsed.title || !parsed.hook) {
         throw new Error('AI script response missing required fields');
+      }
+
+      const hookObj = this.normalizeAIHook(parsed.hook);
+      this.validateShortsHook(hookObj.text);
+
+      let sections = this.normalizeAISections(parsed.sections, strategy);
+      if (sections.length === 0 && (parsed.curiosityGap || parsed.dataReveal)) {
+        const generatedSections = [];
+        if (parsed.curiosityGap) generatedSections.push({ title: 'Curiosity Gap', content: [parsed.curiosityGap], duration: 5 });
+        if (parsed.dataReveal) generatedSections.push({ title: 'Key Data', content: [parsed.dataReveal], duration: 7 });
+        if (parsed.escalation) generatedSections.push({ title: 'Escalation', content: [parsed.escalation], duration: 7 });
+        if (parsed.payoff) generatedSections.push({ title: 'The Payoff', content: [parsed.payoff], duration: 7 });
+        sections = this.normalizeAISections(generatedSections, strategy);
+      }
+
+      if (sections.length === 0) {
+        throw new Error('AI script response missing valid sections');
       }
 
       this.logger.info(`Using AI script generation via ${this.aiTextService.providerName}`);
       return {
         title: String(parsed.title).slice(0, 100),
-        hook: this.normalizeAIHook(parsed.hook),
+        hook: hookObj,
+        shortsStory: {
+          hook: hookObj.text,
+          curiosityGap: parsed.curiosityGap || '',
+          dataReveal: parsed.dataReveal || '',
+          escalation: parsed.escalation || '',
+          payoff: parsed.payoff || '',
+          cta: parsed.cta || ''
+        },
         introduction: await this.generateIntroduction(strategy),
         mainContent: {
           sections,
@@ -266,14 +656,14 @@ Avoid fabricated statistics, unsupported claims, and fake urgency. List every ex
   }
   async generateTitle(strategy) {
     const templates = [
-      `${strategy.angle}`,
+      strategy.angle ? `${strategy.angle}` : null,
       `${strategy.topic}: The Complete Guide`,
       `Everything You Need to Know About ${strategy.topic}`,
       `${strategy.topic} in ${new Date().getFullYear()}: What's Changed?`,
       `The Truth About ${strategy.topic} (Shocking Results)`,
       `How to Master ${strategy.topic} in 30 Days`,
       `${strategy.topic}: Beginner to Expert Guide`
-    ];
+    ].filter(Boolean);
 
     // Select based on content type
     if (strategy.contentType === 'Tutorial') {
@@ -287,7 +677,7 @@ Avoid fabricated statistics, unsupported claims, and fake urgency. List every ex
     return templates[Math.floor(Math.random() * templates.length)];
   }
 
-  async generateHook(strategy) {
+  async generateHook(strategy, appliedDNA = null) {
     const hooks = [
       {
         type: 'question',
@@ -311,12 +701,30 @@ Avoid fabricated statistics, unsupported claims, and fake urgency. List every ex
       }
     ];
 
-    const selected = hooks[Math.floor(Math.random() * hooks.length)];
+    let selected = null;
+    const activeDNA = appliedDNA || this.extractApplicableContentDNA(strategy);
+
+    if (activeDNA?.preferredHookType) {
+      const matching = hooks.filter(h => h.type.toLowerCase() === activeDNA.preferredHookType.toLowerCase());
+      // Preserve 20% exploration unless caller explicitly requests deterministic behavior
+      const shouldExplore = strategy.exploreHook !== false && Math.random() < 0.20;
+      if (matching.length > 0 && !shouldExplore) {
+        selected = matching[Math.floor(Math.random() * matching.length)];
+      }
+    }
+
+    if (!selected) {
+      selected = hooks[Math.floor(Math.random() * hooks.length)];
+    }
+
+    const durationSec = activeDNA?.averageHookDuration
+      ? Math.min(9, Math.max(2, Math.round(activeDNA.averageHookDuration)))
+      : 5;
     
     return {
       type: selected.type,
       text: selected.text,
-      duration: '0:00-0:05'
+      duration: `0:00-0:0${durationSec}`
     };
   }
 
@@ -753,7 +1161,7 @@ Avoid fabricated statistics, unsupported claims, and fake urgency. List every ex
     fullScript += `ESTIMATED DURATION: ${script.duration}\n`;
     fullScript += `TONE: ${script.tone}\n`;
     fullScript += `PACING: ${script.pacing}\n`;
-    fullScript += `KEYWORDS: ${script.keywords.join(', ')}\n`;
+    fullScript += `KEYWORDS: ${(script.keywords || []).join(', ')}\n`;
     
     return fullScript;
   }
@@ -780,4 +1188,19 @@ Avoid fabricated statistics, unsupported claims, and fake urgency. List every ex
   }
 }
 
-module.exports = { ScriptWriterAgent };
+function validateShortsHook(hookInput) {
+  const agent = new ScriptWriterAgent();
+  return agent.validateShortsHook(hookInput);
+}
+
+function buildShortsSceneList(shortsScript, options = {}) {
+  const agent = new ScriptWriterAgent();
+  return agent.buildShortsSceneList(shortsScript, options);
+}
+
+module.exports = {
+  ScriptWriterAgent,
+  validateShortsHook,
+  buildShortsSceneList
+};
+

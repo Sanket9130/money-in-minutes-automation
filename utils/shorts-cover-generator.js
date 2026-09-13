@@ -72,13 +72,14 @@ class ShortsCoverGenerator {
   /**
    * Extracts the hero headline and verified metric pill text.
    */
-  extractCoverElements(scene = {}, script = {}, verifiedData = []) {
+  extractCoverElements(scene = {}, script = {}, verifiedData = [], allScenes = []) {
     const rawText = scene.scriptText || scene.label || script.hook?.text || script.title || 'THE REAL COST';
 
-    // Look for verified data attached to scene or verified pool
+    // Look for verified data attached to scene, scene pool, or verified pool
     let heroMetric = null;
     const pool = [
       ...(scene.verifiedData ? [scene.verifiedData] : []),
+      ...(Array.isArray(allScenes) ? allScenes.map(s => s.verifiedData).filter(Boolean) : []),
       ...(Array.isArray(verifiedData) ? verifiedData : [])
     ];
 
@@ -90,8 +91,17 @@ class ShortsCoverGenerator {
         type: matchedStat.type || 'statistic'
       };
     } else {
-      // Check if text has a clear stat claim
-      const match = rawText.match(/(\$\s*\d+(?:\.\d+)?\s*(?:[bmkt]|billion|million)?|\b\d+%\b)/i);
+      // Check if scene text or any other scene in production has a clear stat claim
+      let statText = rawText;
+      if (Array.isArray(allScenes) && allScenes.length > 0) {
+        for (const s of allScenes) {
+          if (s.scriptText && /(\$\s*\d+|\b\d+%\b)/.test(s.scriptText)) {
+            statText = s.scriptText;
+            break;
+          }
+        }
+      }
+      const match = statText.match(/(\$\s*\d+(?:\.\d+)?\s*(?:[bmkt]|billion|million)?|\b\d+%\b)/i);
       if (match) {
         heroMetric = {
           value: match[1].trim(),
@@ -137,7 +147,7 @@ class ShortsCoverGenerator {
     const verifiedData = production.verifiedData || script.verifiedData || [];
 
     const hookScene = this.selectHookScene(scenes, script);
-    const { headline, heroMetric, sourceAsset } = this.extractCoverElements(hookScene, script, verifiedData);
+    const { headline, heroMetric, sourceAsset } = this.extractCoverElements(hookScene, script, verifiedData, scenes);
 
     const safeZones = {
       top: Math.round(height * 0.15), // 288px
@@ -232,21 +242,30 @@ class ShortsCoverGenerator {
    */
   renderCoverSvg({ width, height, safeZones, headline, heroMetric, brandTitle }) {
     const lines = wrapLines(headline, 14);
-    const heroBoxY = safeZones.top + 100;
     const heroBoxWidth = width - safeZones.left - safeZones.right;
 
     // Line spacing
     const headlineFontSize = lines.length === 1 ? 92 : lines.length === 2 ? 80 : 68;
     const lineHeight = headlineFontSize * 1.15;
+    const headlineBoxHeight = lines.length * lineHeight + 60;
+
+    const hasMetric = Boolean(heroMetric && heroMetric.value);
+    const metricBoxHeight = hasMetric ? 190 : 0;
+    const blockGap = 32;
+    const totalBlockHeight = headlineBoxHeight + (hasMetric ? blockGap + metricBoxHeight : 0);
+
+    const availableHeight = (height - safeZones.bottom) - safeZones.top;
+    const heroBoxY = Math.max(safeZones.top + 30, Math.round(safeZones.top + (availableHeight - totalBlockHeight) / 2));
+    const metricBoxY = heroBoxY + headlineBoxHeight + blockGap;
 
     let metricHtml = '';
-    if (heroMetric && heroMetric.value) {
+    if (hasMetric) {
       const isPositive = heroMetric.type === 'growth' || String(heroMetric.value).startsWith('+');
       const accentColor = isPositive ? '#10b981' : '#38bdf8';
 
       metricHtml = `
         <!-- Hero Stat Pill -->
-        <g transform="translate(${safeZones.left}, ${heroBoxY + 360})">
+        <g transform="translate(${safeZones.left}, ${metricBoxY})">
           <rect width="${heroBoxWidth}" height="190" rx="24" fill="#0f172a" fill-opacity="0.94" stroke="${accentColor}" stroke-width="3" filter="url(#glow)" />
           <text x="32" y="52" fill="#94a3b8" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="bold" letter-spacing="3">${escapeXml(heroMetric.label.toUpperCase())}</text>
           <text x="32" y="142" fill="${accentColor}" font-family="Arial, Helvetica, sans-serif" font-size="82" font-weight="900">${escapeXml(heroMetric.value)}</text>

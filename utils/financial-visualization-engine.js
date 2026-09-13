@@ -87,7 +87,12 @@ class NumberFormatter {
     }
 
     const precision = Number.isInteger(scaled) ? 0 : Math.min(2, options.decimals !== undefined ? options.decimals : 1);
-    const numStr = scaled.toFixed(precision).replace(/\.0+$/, '');
+    let numStr;
+    if (!displayUnit && Number.isInteger(scaled)) {
+      numStr = Math.round(scaled).toLocaleString('en-US');
+    } else {
+      numStr = scaled.toFixed(precision).replace(/\.0+$/, '');
+    }
     const prefix = isNegative ? '-$' : '$';
     const display = `${prefix}${numStr}${displayUnit}`;
 
@@ -386,9 +391,17 @@ class VisualizationRenderer {
     const isPortrait = spec.aspectRatio === '9:16';
 
     const cardX = safe.left + 20;
-    const cardY = safe.top + (isPortrait ? 80 : 30);
     const cardW = width - safe.left - safe.right - 40;
-    const cardH = height - cardY - safe.bottom - (isPortrait ? 80 : 40);
+    // Dynamically size card height to fit content rather than expanding to the full safe zone
+    const targetCardH = isPortrait
+      ? (spec.type === VISUALIZATION_TYPES.RANKING_LIST ? 560 : spec.type === VISUALIZATION_TYPES.TREND_LINE ? 520 : 480)
+      : (spec.type === VISUALIZATION_TYPES.RANKING_LIST ? 380 : 340);
+    const maxSafeH = height - safe.top - safe.bottom - (isPortrait ? 80 : 40);
+    const cardH = Math.min(targetCardH, maxSafeH);
+    // Center card vertically in the active safe zone area above subtitle margins
+    const cardY = isPortrait
+      ? Math.round(safe.top + 40 + (maxSafeH - cardH) / 2)
+      : safe.top + 20;
 
     const sourceTag = escapeXml(spec.source || 'Truth-Anchor Verified');
     const labelTag = escapeXml((spec.label || spec.type).toUpperCase());
@@ -401,20 +414,20 @@ class VisualizationRenderer {
         const val = escapeXml(spec.formatted?.display || '$0');
         graphicSvg = `
           <!-- Hero Financial Metric Card -->
-          <rect x="0" y="0" width="${cardW}" height="${cardH}" rx="24" fill="rgba(15, 23, 42, 0.85)" stroke="rgba(56, 189, 248, 0.45)" stroke-width="2" />
-          <g transform="translate(40, 50)">
+          <rect x="0" y="0" width="${cardW}" height="${cardH}" rx="24" fill="rgba(15, 23, 42, 0.88)" stroke="rgba(56, 189, 248, 0.45)" stroke-width="2" />
+          <g transform="translate(40, 45)">
             <rect x="0" y="0" width="180" height="34" rx="17" fill="rgba(56, 189, 248, 0.18)" stroke="#38bdf8" stroke-width="1" />
             <text x="90" y="23" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#38bdf8" text-anchor="middle">FINANCIAL METRIC</text>
-            <text x="0" y="${isPortrait ? 150 : 105}" font-family="Arial, sans-serif" font-size="${isPortrait ? 88 : 60}" font-weight="900" fill="#38bdf8" letter-spacing="-2">
+            <text x="0" y="${isPortrait ? 135 : 95}" font-family="Arial, sans-serif" font-size="${isPortrait ? 84 : 58}" font-weight="900" fill="#38bdf8" letter-spacing="-2">
               ${val}
             </text>
-            <text x="0" y="${isPortrait ? 215 : 145}" font-family="Arial, sans-serif" font-size="${isPortrait ? 30 : 22}" font-weight="bold" fill="#ffffff">
+            <text x="0" y="${isPortrait ? 195 : 135}" font-family="Arial, sans-serif" font-size="${isPortrait ? 26 : 20}" font-weight="bold" fill="#ffffff">
               ${labelTag}
             </text>
             <!-- Visual Scale Bar -->
-            <rect x="0" y="${isPortrait ? 255 : 175}" width="${cardW - 80}" height="8" rx="4" fill="rgba(255, 255, 255, 0.12)" />
-            <rect x="0" y="${isPortrait ? 255 : 175}" width="${(cardW - 80) * 0.78}" height="8" rx="4" fill="url(#blueGrad)" />
-            <g transform="translate(0, ${isPortrait ? 295 : 205})">
+            <rect x="0" y="${isPortrait ? 230 : 160}" width="${cardW - 80}" height="8" rx="4" fill="rgba(255, 255, 255, 0.12)" />
+            <rect x="0" y="${isPortrait ? 230 : 160}" width="${(cardW - 80) * 0.78}" height="8" rx="4" fill="url(#blueGrad)" />
+            <g transform="translate(0, ${isPortrait ? 265 : 185})">
               <circle cx="10" cy="10" r="9" fill="#10b981" />
               <path d="M6 10 l3 3 l6 -6" stroke="#ffffff" stroke-width="2" fill="none" />
               <text x="28" y="15" font-family="Arial, sans-serif" font-size="15" font-weight="bold" fill="#10b981">
@@ -434,19 +447,19 @@ class VisualizationRenderer {
         const arrow = isPositive ? '▲' : '▼';
         graphicSvg = `
           <!-- Growth / Percentage Indicator Card -->
-          <rect x="0" y="0" width="${cardW}" height="${cardH}" rx="24" fill="rgba(15, 23, 42, 0.85)" stroke="${color}" stroke-width="2" />
-          <g transform="translate(40, 50)">
+          <rect x="0" y="0" width="${cardW}" height="${cardH}" rx="24" fill="rgba(15, 23, 42, 0.88)" stroke="${color}" stroke-width="2" />
+          <g transform="translate(40, 45)">
             <rect x="0" y="0" width="190" height="34" rx="17" fill="rgba(16, 185, 129, 0.15)" stroke="${color}" stroke-width="1" />
             <text x="95" y="23" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="${color}" text-anchor="middle">GROWTH RATE</text>
-            <text x="0" y="${isPortrait ? 150 : 105}" font-family="Arial, sans-serif" font-size="${isPortrait ? 88 : 60}" font-weight="900" fill="${color}" letter-spacing="-2">
+            <text x="0" y="${isPortrait ? 135 : 95}" font-family="Arial, sans-serif" font-size="${isPortrait ? 84 : 58}" font-weight="900" fill="${color}" letter-spacing="-2">
               ${arrow} ${val}
             </text>
-            <text x="0" y="${isPortrait ? 215 : 145}" font-family="Arial, sans-serif" font-size="${isPortrait ? 30 : 22}" font-weight="bold" fill="#ffffff">
+            <text x="0" y="${isPortrait ? 195 : 135}" font-family="Arial, sans-serif" font-size="${isPortrait ? 26 : 20}" font-weight="bold" fill="#ffffff">
               ${labelTag}
             </text>
-            <rect x="0" y="${isPortrait ? 255 : 175}" width="${cardW - 80}" height="8" rx="4" fill="rgba(255, 255, 255, 0.12)" />
-            <rect x="0" y="${isPortrait ? 255 : 175}" width="${(cardW - 80) * 0.85}" height="8" rx="4" fill="${color}" />
-            <g transform="translate(0, ${isPortrait ? 295 : 205})">
+            <rect x="0" y="${isPortrait ? 230 : 160}" width="${cardW - 80}" height="8" rx="4" fill="rgba(255, 255, 255, 0.12)" />
+            <rect x="0" y="${isPortrait ? 230 : 160}" width="${(cardW - 80) * 0.85}" height="8" rx="4" fill="${color}" />
+            <g transform="translate(0, ${isPortrait ? 265 : 185})">
               <text x="0" y="15" font-family="Arial, sans-serif" font-size="15" font-weight="bold" fill="#94a3b8">
                 Verified: ${sourceTag}
               </text>
@@ -461,27 +474,40 @@ class VisualizationRenderer {
         const right = spec.formatted?.right || { label: 'Entity B', formatted: { display: '$0' }, ratio: 0.5 };
         const maxBarW = cardW - 80;
 
+        // Contextually derive comparison title based on scene content
+        const rawCompLabel = String(spec.label || '').toLowerCase();
+        let comparisonHeader = 'HEAD-TO-HEAD COMPARISON';
+        if (rawCompLabel.includes('spend') || rawCompLabel.includes('cost') || rawCompLabel.includes('expense') || rawCompLabel.includes('subscription')) {
+          comparisonHeader = 'COST COMPARISON';
+        } else if (rawCompLabel.includes('revenue') || rawCompLabel.includes('sales')) {
+          comparisonHeader = 'REVENUE COMPARISON';
+        } else if (rawCompLabel.includes('user') || rawCompLabel.includes('audience') || rawCompLabel.includes('subscriber')) {
+          comparisonHeader = 'AUDIENCE COMPARISON';
+        } else if (spec.label && spec.label.length <= 28) {
+          comparisonHeader = escapeXml(spec.label.toUpperCase());
+        }
+
         graphicSvg = `
           <!-- Comparison Bars Card -->
           <rect x="0" y="0" width="${cardW}" height="${cardH}" rx="24" fill="rgba(15, 23, 42, 0.88)" stroke="rgba(255, 255, 255, 0.15)" stroke-width="1.5" />
-          <g transform="translate(40, 45)">
-            <text x="${(cardW - 80) / 2}" y="20" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#f59e0b" text-anchor="middle">HEAD-TO-HEAD REVENUE</text>
+          <g transform="translate(40, 40)">
+            <text x="${(cardW - 80) / 2}" y="20" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#f59e0b" text-anchor="middle">${comparisonHeader}</text>
             <!-- Left Entity Bar -->
-            <g transform="translate(0, 50)">
-              <text x="0" y="20" font-family="Arial, sans-serif" font-size="${isPortrait ? 24 : 18}" font-weight="bold" fill="#ffffff">${escapeXml(left.label)}</text>
-              <text x="${maxBarW}" y="20" font-family="Arial, sans-serif" font-size="${isPortrait ? 24 : 18}" font-weight="bold" fill="#38bdf8" text-anchor="end">${escapeXml(left.formatted.display)}</text>
-              <rect x="0" y="32" width="${maxBarW}" height="24" rx="12" fill="rgba(255, 255, 255, 0.08)" />
-              <rect x="0" y="32" width="${Math.max(24, maxBarW * left.ratio)}" height="24" rx="12" fill="url(#blueGrad)" />
+            <g transform="translate(0, 45)">
+              <text x="0" y="18" font-family="Arial, sans-serif" font-size="${isPortrait ? 22 : 16}" font-weight="bold" fill="#ffffff">${escapeXml(left.label)}</text>
+              <text x="${maxBarW}" y="18" font-family="Arial, sans-serif" font-size="${isPortrait ? 22 : 16}" font-weight="bold" fill="#38bdf8" text-anchor="end">${escapeXml(left.formatted.display)}</text>
+              <rect x="0" y="28" width="${maxBarW}" height="22" rx="11" fill="rgba(255, 255, 255, 0.08)" />
+              <rect x="0" y="28" width="${Math.max(24, maxBarW * left.ratio)}" height="22" rx="11" fill="url(#blueGrad)" />
             </g>
             <!-- Right Entity Bar -->
-            <g transform="translate(0, ${isPortrait ? 150 : 115})">
-              <text x="0" y="20" font-family="Arial, sans-serif" font-size="${isPortrait ? 24 : 18}" font-weight="bold" fill="#ffffff">${escapeXml(right.label)}</text>
-              <text x="${maxBarW}" y="20" font-family="Arial, sans-serif" font-size="${isPortrait ? 24 : 18}" font-weight="bold" fill="#a855f7" text-anchor="end">${escapeXml(right.formatted.display)}</text>
-              <rect x="0" y="32" width="${maxBarW}" height="24" rx="12" fill="rgba(255, 255, 255, 0.08)" />
-              <rect x="0" y="32" width="${Math.max(24, maxBarW * right.ratio)}" height="24" rx="12" fill="url(#purpleGrad)" />
+            <g transform="translate(0, ${isPortrait ? 135 : 100})">
+              <text x="0" y="18" font-family="Arial, sans-serif" font-size="${isPortrait ? 22 : 16}" font-weight="bold" fill="#ffffff">${escapeXml(right.label)}</text>
+              <text x="${maxBarW}" y="18" font-family="Arial, sans-serif" font-size="${isPortrait ? 22 : 16}" font-weight="bold" fill="#a855f7" text-anchor="end">${escapeXml(right.formatted.display)}</text>
+              <rect x="0" y="28" width="${maxBarW}" height="22" rx="11" fill="rgba(255, 255, 255, 0.08)" />
+              <rect x="0" y="28" width="${Math.max(24, maxBarW * right.ratio)}" height="22" rx="11" fill="url(#purpleGrad)" />
             </g>
             <!-- Verified Source Badge -->
-            <g transform="translate(0, ${isPortrait ? 250 : 190})">
+            <g transform="translate(0, ${isPortrait ? 225 : 165})">
               <text x="0" y="15" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#94a3b8">
                 Source: ${sourceTag}
               </text>

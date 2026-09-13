@@ -285,6 +285,217 @@ class GoogleOmniProvider extends VideoProvider {
   }
 }
 
+class GoogleVeoProvider extends VideoProvider {
+  constructor(credentials, options = {}) {
+    const creds = normalizeCredentials(credentials);
+    super('google_veo', {
+      model: options.model || process.env.GOOGLE_VEO_MODEL || 'veo-3.1-generate-preview',
+      capabilities: {
+        minDuration: 5,
+        maxDuration: 8,
+        defaultResolution: '720p',
+        maxPromptLength: 2000,
+        text: true,
+        firstFrame: true,
+        referenceImages: 1,
+        nativeAudio: false,
+        aspectRatios: ['16:9', '9:16'],
+        resolutions: ['720p', '1080p']
+      }
+    });
+    this.enabled = options.enabled !== undefined
+      ? Boolean(options.enabled)
+      : process.env.GOOGLE_VEO_ENABLED === 'true';
+    const key = options.apiKey || creds.google_veo?.apiKey || creds.gemini?.apiKey || process.env.GEMINI_API_KEY;
+    this.apiKey = key || null;
+    if (options.client) {
+      this.client = options.client;
+    } else if (key) {
+      const { GoogleGenAI } = require('@google/genai');
+      this.client = new GoogleGenAI({ apiKey: key });
+    } else {
+      this.client = null;
+    }
+  }
+
+  isAvailable() {
+    return Boolean(this.enabled && this.client);
+  }
+
+  classifyError(error) {
+    const status = error?.status || error?.response?.status || error?.code;
+    const message = String(error?.message || error?.error?.message || error || '');
+    if (status === 429 || /resource_exhausted|quota|rate\s*limit/i.test(message)) {
+      return { type: 'QUOTA_EXHAUSTED', message: `Veo quota exhausted: ${message}`, status: 429 };
+    }
+    if (status === 401 || status === 403 || /unauthenticated|permission_denied|api key/i.test(message)) {
+      return { type: 'AUTHENTICATION_ERROR', message: `Veo authentication failed: ${message}`, status: status || 401 };
+    }
+    if (status === 400 || /invalid_argument|bad request/i.test(message)) {
+      return { type: 'INVALID_REQUEST', message: `Veo invalid request: ${message}`, status: 400 };
+    }
+    if (status === 408 || /timeout|deadline_exceeded/i.test(message)) {
+      return { type: 'TIMEOUT_ERROR', message: `Veo operation timed out: ${message}`, status: 408 };
+    }
+    if (/enotfound|econnrefused|econnreset|network/i.test(message)) {
+      return { type: 'NETWORK_ERROR', message: `Veo network error: ${message}`, status: 503 };
+    }
+    return { type: 'PROVIDER_FAILURE', message: `Veo provider failure: ${message}`, status: 500 };
+  }
+
+  normalizeRequest(input = {}) {
+    const base = super.normalizeRequest(input);
+    const duration = base.duration <= 5 ? 5 : 8;
+    const aspectRatio = ['9:16', '16:9'].includes(base.aspectRatio) ? base.aspectRatio : '9:16';
+    const resolution = ['720p', '1080p'].includes(String(base.resolution).toLowerCase())
+      ? String(base.resolution).toLowerCase()
+      : '720p';
+    return {
+      ...base,
+      duration,
+      aspectRatio,
+      resolution
+    };
+  }
+
+  async createTask(input) {
+    if (!this.client) {
+      throw new Error('Google Veo client is not initialized or API key is missing');
+    }
+    const request = this.normalizeRequest(input);
+    let image = undefined;
+    if (request.firstFrame) {
+      const dataUrl = await fileToDataUrl(request.firstFrame);
+      const match = dataUrl ? dataUrl.match(/^data:([^;]+);base64,(.+)$/) : null;
+      if (match) {
+        image = {
+          imageBytes: match[2],
+          mimeType: match[1]
+        };
+      }
+    }
+
+    try {
+      const params = {
+        model: this.model,
+        prompt: request.prompt,
+        config: {
+          numberOfVideos: 1,
+          durationSeconds: request.duration,
+          aspectRatio: request.aspectRatio,
+          resolution: request.resolution
+        }
+      };
+      if (image) {
+        params.image = image;
+      }
+
+      const operation = await this.client.models.generateVideos(params);
+      const externalTaskId = operation?.name || operation?.id || (typeof operation === 'string' ? operation : `veo_${Date.now()}`);
+      return {
+        externalTaskId,
+        status: operation?.done ? 'succeeded' : 'queued',
+        operation,
+        outputUrl: null,
+        error: null,
+        model: this.model
+      };
+    } catch (error) {
+      const classified = this.classifyError(error);
+      const err = new Error(classified.message);
+      err.code = classified.type;
+      err.status = classified.status;
+      throw err;
+    }
+  }
+
+  async getTask(id, providerData = {}) {
+    if (!this.client) {
+      throw new Error('Google Veo client is not initialized');
+    }
+    try {
+      let operation;
+      if (this.client.operations?.get) {
+        operation = await this.client.operations.get({
+          operation: providerData.operation || { name: id },
+          operationName: id
+        });
+      } else {
+        throw new Error('Google Veo operations client unavailable');
+      }
+
+      if (operation?.error) {
+        const classified = this.classifyError(operation.error);
+        return {
+          externalTaskId: id,
+          status: 'failed',
+          outputUrl: null,
+          error: classified.message,
+          errorType: classified.type
+        };
+      }
+
+      if (operation?.done) {
+        const videos = operation.response?.generatedVideos || [];
+        const first = videos[0];
+        const outputUrl = first?.video?.uri || first?.uri || null;
+        return {
+          externalTaskId: id,
+          status: 'succeeded',
+          outputUrl,
+          video: first,
+          operation,
+          error: null
+        };
+      }
+
+      return {
+        externalTaskId: id,
+        status: 'running',
+        operation,
+        outputUrl: null,
+        error: null
+      };
+    } catch (error) {
+      const classified = this.classifyError(error);
+      return {
+        externalTaskId: id,
+        status: 'failed',
+        outputUrl: null,
+        error: classified.message,
+        errorType: classified.type
+      };
+    }
+  }
+
+  async downloadResult(task, outputPath) {
+    await fs.mkdir(path.dirname(outputPath), { recursive: true });
+    if (task.video && this.client?.files?.download) {
+      try {
+        await this.client.files.download({
+          file: task.video,
+          downloadPath: outputPath
+        });
+        const stats = await fs.stat(outputPath).catch(() => null);
+        if (stats && stats.size > 0) {
+          return outputPath;
+        }
+      } catch (_err) {
+        // Fall back to direct URL fetch below
+      }
+    }
+    if (task.outputUrl) {
+      const url = task.outputUrl.includes('key=') || !this.apiKey
+        ? task.outputUrl
+        : `${task.outputUrl}${task.outputUrl.includes('?') ? '&' : '?'}key=${this.apiKey}`;
+      const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 120000 });
+      await fs.writeFile(outputPath, Buffer.from(response.data));
+      return outputPath;
+    }
+    throw new Error('Google Veo completed without a downloadable video');
+  }
+}
+
 class KlingProvider extends VideoProvider {
   constructor(credentials, options = {}) {
     const creds = normalizeCredentials(credentials);
@@ -423,6 +634,7 @@ class VideoProviderRegistry {
       ['seedance', injected.seedance || new SeedanceProvider(credentials, options.seedance)],
       ['minimax_h3', injected.minimax_h3 || new MiniMaxH3Provider(credentials, options.minimax_h3)],
       ['google_omni', injected.google_omni || new GoogleOmniProvider(credentials, options.google_omni)],
+      ['google_veo', injected.google_veo || new GoogleVeoProvider(credentials, options.google_veo)],
       ['kling', injected.kling || new KlingProvider(credentials, options.kling)],
       ['wan', injected.wan || new WanProvider(credentials, options.wan)],
       ['slideshow', injected.slideshow || new SlideshowProvider()]
@@ -452,6 +664,7 @@ module.exports = {
   SeedanceProvider,
   MiniMaxH3Provider,
   GoogleOmniProvider,
+  GoogleVeoProvider,
   KlingProvider,
   WanProvider,
   SlideshowProvider,

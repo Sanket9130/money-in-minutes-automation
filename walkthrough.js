@@ -133,6 +133,12 @@ const VIDEO_PROVIDER_GUIDE = {
     credentialName: 'Gemini API key',
     save(credentials, value) { credentials.gemini = { ...(credentials.gemini || {}), apiKey: value }; }
   },
+  google_veo: {
+    label: 'Google Veo 3.1 — high-fidelity cinematic video generation',
+    keyUrl: 'https://aistudio.google.com/apikey',
+    credentialName: 'Gemini API key',
+    save(credentials, value) { credentials.gemini = { ...(credentials.gemini || {}), apiKey: value }; }
+  },
   kling: {
     label: 'Kuaishou Kling 3.0 Omni — storyboards and character performance',
     keyUrl: 'https://kling.ai/global/dev',
