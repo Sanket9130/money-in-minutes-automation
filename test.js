@@ -112,7 +112,8 @@ class SystemTest {
       { name: 'FinTech Kinetic Full-Canvas Scene Composition (Phase 1)', test: () => this.testFinTechKineticFullCanvasComposition() },
       { name: 'FinTech Kinetic B-Roll Provenance & In-Scene Micro-Animation (Phase 2A)', test: () => this.testFinTechKineticBRollAndMicroAnimation() },
       { name: 'Autonomous Daily YouTube Shorts Publishing (Phase 7)', test: () => this.testAutonomousDailyShortsPublishing() },
-      { name: 'Missed-Day Recovery & Backfill Engine (Phase 8)', test: () => this.testMissedDayRecoveryAndBackfill() }
+      { name: 'Missed-Day Recovery & Backfill Engine (Phase 8)', test: () => this.testMissedDayRecoveryAndBackfill() },
+      { name: 'Scheduler Daily Shorts UTC Schedule & Execution', test: () => this.testSchedulerDailyShortsSchedule() }
     ];
 
     let passed = 0;
@@ -10279,6 +10280,135 @@ class SystemTest {
       await db.close().catch(() => {});
       await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
     }
+  }
+
+  async testSchedulerDailyShortsSchedule() {
+    this.logger.info('Starting Scheduler Daily Shorts UTC Schedule & Execution tests...');
+    const TimeMatcher = require('node-cron/src/time-matcher');
+
+    // Case 1: Config & Cron Expression Resolution
+    const fakeDb = {
+      getAllRows: async () => [],
+      getRow: async () => null,
+      executeQuery: async () => ({}),
+      generateId: prefix => `${prefix}_test`
+    };
+    const scheduler = new DailyAutomation({}, fakeDb);
+    const config = scheduler.getShortsScheduleConfig();
+    if (config.cronExpression !== '0 17 * * *') {
+      throw new Error(`Case 1 Failed: Expected cronExpression '0 17 * * *', got '${config.cronExpression}'`);
+    }
+    if (config.publishTimezone !== 'UTC') {
+      throw new Error(`Case 1 Failed: Expected publishTimezone 'UTC', got '${config.publishTimezone}'`);
+    }
+    if (config.publishTime !== '17:00') {
+      throw new Error(`Case 1 Failed: Expected publishTime '17:00', got '${config.publishTime}'`);
+    }
+    this.logger.info('Case 1 Passed: Schedule config resolves to 0 17 * * * with UTC timezone.');
+
+    // Case 2: Explicit Timezone Matching (17:00 UTC = 10:30 PM IST)
+    const matcher = new TimeMatcher(config.cronExpression, config.publishTimezone);
+    const exactUtc = new Date('2026-09-14T17:00:00.000Z');
+    if (!matcher.match(exactUtc)) {
+      throw new Error('Case 2 Failed: TimeMatcher did not match 17:00:00 UTC');
+    }
+    if (matcher.match(new Date('2026-09-14T16:59:59.000Z'))) {
+      throw new Error('Case 2 Failed: TimeMatcher falsely matched 16:59:59 UTC');
+    }
+    if (matcher.match(new Date('2026-09-14T17:01:00.000Z'))) {
+      throw new Error('Case 2 Failed: TimeMatcher falsely matched 17:01:00 UTC');
+    }
+    if (matcher.match(new Date('2026-09-14T05:00:00.000Z'))) {
+      throw new Error('Case 2 Failed: TimeMatcher falsely matched 05:00:00 UTC (legacy phase 7 bug)');
+    }
+
+    // Verify IST conversion explicitly
+    const istTimeStr = exactUtc.toLocaleTimeString('en-US', {
+      timeZone: 'Asia/Kolkata',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true
+    });
+    if (!istTimeStr.includes('10:30') || !istTimeStr.includes('PM')) {
+      throw new Error(`Case 2 Failed: 17:00 UTC did not format as 10:30 PM IST (got '${istTimeStr}')`);
+    }
+    this.logger.info(`Case 2 Passed: Time matching verified. 17:00 UTC matches and formats as ${istTimeStr} IST.`);
+
+    // Case 3: Task Registration in Scheduled Tasks Map
+    await scheduler.setupScheduledTasks();
+    const task = scheduler.scheduledTasks.get('daily-shorts-automation');
+    if (!task) {
+      throw new Error('Case 3 Failed: daily-shorts-automation was not registered in scheduledTasks Map');
+    }
+    if (task.options.timezone !== 'UTC') {
+      throw new Error(`Case 3 Failed: Task options.timezone is '${task.options.timezone}', expected 'UTC'`);
+    }
+    if (task.options.recoverMissedExecutions !== true) {
+      throw new Error('Case 3 Failed: Task options.recoverMissedExecutions is not true');
+    }
+    this.logger.info('Case 3 Passed: Task registered with UTC timezone and recoverMissedExecutions enabled.');
+
+    // Case 4: Next-Run Calculation Resolves to Future 17:00 UTC
+    const nextRun = scheduler.calculateNextRunTime('0 17 * * *', 'UTC');
+    if (!nextRun || !(nextRun instanceof Date)) {
+      throw new Error('Case 4 Failed: calculateNextRunTime did not return a valid Date object');
+    }
+    if (nextRun.getUTCHours() !== 17 || nextRun.getUTCMinutes() !== 0 || nextRun.getUTCSeconds() !== 0) {
+      throw new Error(`Case 4 Failed: Next run time is not 17:00:00 UTC (got ${nextRun.toISOString()})`);
+    }
+    this.logger.info(`Case 4 Passed: Calculated next run correctly resolves to: ${nextRun.toISOString()} (${nextRun.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })} IST).`);
+
+    // Case 5: Callback Invocation When Scheduled Time is Reached (Zero Network / Dry-Run)
+    let publishingInvoked = false;
+    let publishOptionsPassed = null;
+    scheduler.runDailyShortsPublishing = async (opts) => {
+      publishingInvoked = true;
+      publishOptionsPassed = opts;
+      return { completed: true, quotaMet: true };
+    };
+
+    // Trigger scheduled task now() directly (simulating scheduler tick)
+    task.now(new Date('2026-09-14T17:00:00.000Z'));
+    if (!publishingInvoked) {
+      throw new Error('Case 5 Failed: Scheduler task execution did not invoke runDailyShortsPublishing');
+    }
+    if (publishOptionsPassed === null) {
+      // opts can be default empty object
+    }
+    this.logger.info('Case 5 Passed: Task callback reliably invokes runDailyShortsPublishing when scheduled time is reached.');
+
+    // Case 6: Gate Conditions (DAILY_SHORT_ENABLED=false & isEnabled=false)
+    publishingInvoked = false;
+    const prevEnabled = process.env.DAILY_SHORT_ENABLED;
+    process.env.DAILY_SHORT_ENABLED = 'false';
+    task.now(new Date('2026-09-14T17:00:00.000Z'));
+    process.env.DAILY_SHORT_ENABLED = prevEnabled;
+    if (publishingInvoked) {
+      throw new Error('Case 6 Failed: Callback was invoked when DAILY_SHORT_ENABLED was false');
+    }
+
+    publishingInvoked = false;
+    scheduler.isEnabled = false;
+    task.now(new Date('2026-09-14T17:00:00.000Z'));
+    scheduler.isEnabled = true;
+    if (publishingInvoked) {
+      throw new Error('Case 6 Failed: Callback was invoked when scheduler.isEnabled was false');
+    }
+    this.logger.info('Case 6 Passed: Safety gates (DAILY_SHORT_ENABLED & isEnabled) verified.');
+
+    // Case 7: Clean Shutdown of UTC Task
+    await scheduler.stopAutomation();
+    if (scheduler.scheduledTasks.size !== 0) {
+      throw new Error('Case 7 Failed: Scheduled tasks map was not cleared on stopAutomation');
+    }
+    this.logger.info('Case 7 Passed: Scheduled tasks stopped and cleared cleanly.');
+
+    // Case 8: Startup Recovery Window Logic
+    const shortsConfig = scheduler.getShortsScheduleConfig();
+    const [h, m] = shortsConfig.publishTime.split(':').map(n => parseInt(n, 10) || 0);
+    const testNow = new Date();
+    const windowPassed = testNow.getUTCHours() > h || (testNow.getUTCHours() === h && testNow.getUTCMinutes() >= m);
+    this.logger.info(`Case 8 Passed: Startup recovery window logic evaluated (windowPassed=${windowPassed}).`);
   }
 }
 

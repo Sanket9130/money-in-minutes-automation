@@ -103,19 +103,28 @@ class DailyAutomation {
       }, { scheduled: false })
     );
 
-    // Phase 7: Autonomous Daily Shorts Publishing (at 5:00 AM for 18:00 scheduled release)
+    // Phase 7 & 8: Autonomous Daily Shorts Publishing (17:00 UTC = 10:30 PM IST)
+    const shortsConfig = this.getShortsScheduleConfig();
     this.scheduledTasks.set('daily-shorts-automation',
-      cron.schedule('0 5 * * *', async () => {
+      cron.schedule(shortsConfig.cronExpression, async () => {
         if (this.isEnabled && process.env.DAILY_SHORT_ENABLED !== 'false') {
           await this.runDailyShortsPublishing();
         }
-      }, { scheduled: false })
+      }, {
+        scheduled: false,
+        timezone: shortsConfig.publishTimezone,
+        recoverMissedExecutions: true
+      })
     );
 
     // Start all scheduled tasks
     this.scheduledTasks.forEach((task, name) => {
       task.start();
-      this.logger.info(`Started scheduled task: ${name}`);
+      if (name === 'daily-shorts-automation') {
+        this.logger.info(`Started scheduled task: ${name} (cron: '${shortsConfig.cronExpression}', tz: '${shortsConfig.publishTimezone}', target: ${shortsConfig.publishTime} UTC / 10:30 PM IST)`);
+      } else {
+        this.logger.info(`Started scheduled task: ${name}`);
+      }
     });
   }
 
@@ -141,6 +150,44 @@ class DailyAutomation {
     }
   }
 
+  getShortsScheduleConfig() {
+    const publishTime = process.env.DAILY_SHORT_PUBLISH_TIME || '17:00';
+    const publishTimezone = process.env.DAILY_SHORT_TIMEZONE || 'UTC';
+    const [hours, minutes] = publishTime.split(':').map(n => parseInt(n, 10) || 0);
+    const cronExpression = `${minutes} ${hours} * * *`;
+    const nextRun = this.calculateNextRunTime(cronExpression, publishTimezone);
+    return {
+      publishTime,
+      publishTimezone,
+      hours,
+      minutes,
+      cronExpression,
+      targetTimeUtc: `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')} UTC`,
+      nextRunUtc: nextRun ? nextRun.toISOString() : null,
+      nextRunLocal: nextRun ? nextRun.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }) : null
+    };
+  }
+
+  calculateNextRunTime(pattern, timezone = 'UTC') {
+    try {
+      const TimeMatcher = require('node-cron/src/time-matcher');
+      const matcher = new TimeMatcher(pattern, timezone);
+      const now = new Date();
+      let candidate = new Date(now.getTime() + 1000);
+      candidate.setMilliseconds(0);
+      candidate.setSeconds(0);
+      for (let i = 0; i < 24 * 60 * 2; i++) {
+        if (matcher.match(candidate)) {
+          return candidate;
+        }
+        candidate = new Date(candidate.getTime() + 60 * 1000);
+      }
+      return null;
+    } catch (_err) {
+      return null;
+    }
+  }
+
   async triggerStartupShortsCheck() {
     if (!this.isEnabled || process.env.DAILY_SHORT_ENABLED === 'false') {
       return;
@@ -155,9 +202,24 @@ class DailyAutomation {
       const missed = await publisher.detectMissedDays();
       const status = await publisher.checkDailyStatus();
 
-      if (missed.length > 0 || !status.hasMetDailyQuota) {
+      const shortsConfig = this.getShortsScheduleConfig();
+      const now = new Date();
+      const [pubHours, pubMinutes] = (shortsConfig.publishTime || '17:00').split(':').map(n => parseInt(n, 10) || 0);
+      const targetUtcToday = new Date(Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth(),
+        now.getUTCDate(),
+        pubHours,
+        pubMinutes,
+        0,
+        0
+      ));
+      const publishWindowPassed = now.getTime() >= targetUtcToday.getTime();
+      const todayMissedAfterWindow = !status.hasMetDailyQuota && publishWindowPassed;
+
+      if (missed.length > 0 || todayMissedAfterWindow) {
         this.logger.info(
-          `Startup check: found ${missed.length} missed day(s) and today's quota fulfilled=${status.hasMetDailyQuota}. Triggering autonomous publishing cycle...`
+          `Startup check: found ${missed.length} historical missed day(s), today's quota fulfilled=${status.hasMetDailyQuota} (window passed=${publishWindowPassed}). Triggering autonomous publishing cycle...`
         );
         // Run in background without blocking scheduler initialization
         setTimeout(async () => {
@@ -851,7 +913,7 @@ class DailyAutomation {
 
     // Check scheduled tasks
     this.scheduledTasks.forEach((task, name) => {
-      health.scheduledTasks[name] = task.running;
+      health.scheduledTasks[name] = Boolean(task.running || task._scheduler?.timeout);
     });
 
     // Get system resources (simplified)
@@ -931,10 +993,14 @@ class DailyAutomation {
   async getAutomationStatus() {
     return {
       enabled: this.isEnabled,
-      scheduledTasks: Array.from(this.scheduledTasks.keys()).map(name => ({
-        name,
-        running: this.scheduledTasks.get(name).running
-      })),
+      scheduledTasks: Array.from(this.scheduledTasks.keys()).map(name => {
+        const task = this.scheduledTasks.get(name);
+        return {
+          name,
+          running: Boolean(task.running || task._scheduler?.timeout),
+          timezone: task.options?.timezone || 'local'
+        };
+      }),
       lastHealthCheck: this.lastHealthCheck,
       uptime: process.uptime()
     };
