@@ -646,23 +646,28 @@ class Database {
       `CREATE INDEX IF NOT EXISTS idx_daily_shorts_status ON daily_shorts_publications(status)`,
       `CREATE INDEX IF NOT EXISTS idx_daily_shorts_content_hash ON daily_shorts_publications(content_hash)`,
       `CREATE INDEX IF NOT EXISTS idx_daily_shorts_scheduled_at ON daily_shorts_publications(scheduled_at)`,
-      // Phase 8: Autonomous Daily Shorts Backlog & Missed-Day Recovery
+      // Phase 8: Autonomous Daily Shorts Backlog & Missed-Day Recovery (Composite key target_date + slot_index)
       `CREATE TABLE IF NOT EXISTS daily_shorts_backlog (
-        target_date TEXT PRIMARY KEY,
+        target_date TEXT NOT NULL,
+        slot_index INTEGER NOT NULL DEFAULT 1,
         status TEXT NOT NULL DEFAULT 'PENDING',
         production_id TEXT,
         scheduled_for TEXT,
         attempt_count INTEGER DEFAULT 0,
         last_error TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (target_date, slot_index)
       )`,
-      `CREATE INDEX IF NOT EXISTS idx_backlog_status ON daily_shorts_backlog(status)`
+      `CREATE INDEX IF NOT EXISTS idx_backlog_status ON daily_shorts_backlog(status)`,
+      `CREATE INDEX IF NOT EXISTS idx_backlog_target_date ON daily_shorts_backlog(target_date)`
     ];
 
     for (const tableQuery of tables) {
       await this.executeQuery(tableQuery);
     }
+
+    await this.ensureBacklogMultiSlotSchema();
 
     await this.ensureColumns('production_scenes', {
       narration_provider: 'TEXT',
@@ -695,6 +700,40 @@ class Database {
       if (!existing.has(columnName)) {
         await this.executeQuery(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
       }
+    }
+  }
+
+  async ensureBacklogMultiSlotSchema() {
+    try {
+      const cols = await this.getAllRows('PRAGMA table_info(daily_shorts_backlog)');
+      const hasSlotIndex = cols.some(c => c.name === 'slot_index');
+      if (!hasSlotIndex && cols.length > 0) {
+        await this.executeQuery(`
+          CREATE TABLE IF NOT EXISTS daily_shorts_backlog_v2 (
+            target_date TEXT NOT NULL,
+            slot_index INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL DEFAULT 'PENDING',
+            production_id TEXT,
+            scheduled_for TEXT,
+            attempt_count INTEGER DEFAULT 0,
+            last_error TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (target_date, slot_index)
+          )
+        `);
+        await this.executeQuery(`
+          INSERT OR IGNORE INTO daily_shorts_backlog_v2 (
+            target_date, slot_index, status, production_id, scheduled_for, attempt_count, last_error, created_at, updated_at
+          ) SELECT target_date, 1, status, production_id, scheduled_for, attempt_count, last_error, created_at, updated_at FROM daily_shorts_backlog
+        `);
+        await this.executeQuery('DROP TABLE daily_shorts_backlog');
+        await this.executeQuery('ALTER TABLE daily_shorts_backlog_v2 RENAME TO daily_shorts_backlog');
+        await this.executeQuery('CREATE INDEX IF NOT EXISTS idx_backlog_status ON daily_shorts_backlog(status)');
+        await this.executeQuery('CREATE INDEX IF NOT EXISTS idx_backlog_target_date ON daily_shorts_backlog(target_date)');
+      }
+    } catch (_err) {
+      // Advisory migration error (table might be newly created)
     }
   }
 
@@ -3403,42 +3442,55 @@ class Database {
 
     const curr = new Date(startStr + 'T00:00:00.000Z');
     const end = new Date(todayStr + 'T00:00:00.000Z');
+    const targetDailyCount = Number(
+      options.targetDailyCount ||
+      options.dailyMinimum ||
+      process.env.DAILY_SHORTS_TARGET_COUNT ||
+      process.env.DAILY_SHORT_MINIMUM ||
+      2
+    );
 
     while (curr.getTime() < end.getTime()) {
       const dateStr = curr.toISOString().slice(0, 10);
 
-      // Check if this date is already satisfied in publications
+      // Check all completed/scheduled publications on this date
       const completedOnDate = await this.getAllRows(
         `SELECT production_id FROM daily_shorts_publications
          WHERE (strftime('%Y-%m-%d', published_at) = ? OR strftime('%Y-%m-%d', scheduled_at) = ?)
-           AND status IN ('SCHEDULED', 'PUBLISHED') LIMIT 1`,
+           AND status IN ('SCHEDULED', 'PUBLISHED')
+         ORDER BY created_at ASC`,
         [dateStr, dateStr]
       );
 
-      const existingBacklog = await this.getRow(
-        'SELECT status FROM daily_shorts_backlog WHERE target_date = ?',
-        [dateStr]
-      );
+      for (let slot = 1; slot <= targetDailyCount; slot++) {
+        const completedRecord = completedOnDate[slot - 1];
+        const existingBacklog = await this.getRow(
+          'SELECT status FROM daily_shorts_backlog WHERE target_date = ? AND slot_index = ?',
+          [dateStr, slot]
+        );
 
-      if (completedOnDate && completedOnDate.length > 0) {
-        if (!existingBacklog) {
-          await this.saveBacklogObligation({
-            target_date: dateStr,
-            status: 'SATISFIED',
-            production_id: completedOnDate[0].production_id
-          });
-        } else if (existingBacklog.status === 'PENDING') {
-          await this.updateBacklogObligation(dateStr, {
-            status: 'SATISFIED',
-            production_id: completedOnDate[0].production_id
-          });
-        }
-      } else {
-        if (!existingBacklog) {
-          await this.saveBacklogObligation({
-            target_date: dateStr,
-            status: 'PENDING'
-          });
+        if (completedRecord) {
+          if (!existingBacklog) {
+            await this.saveBacklogObligation({
+              target_date: dateStr,
+              slot_index: slot,
+              status: 'SATISFIED',
+              production_id: completedRecord.production_id
+            });
+          } else if (existingBacklog.status === 'PENDING') {
+            await this.updateBacklogObligation(dateStr, {
+              status: 'SATISFIED',
+              production_id: completedRecord.production_id
+            }, slot);
+          }
+        } else {
+          if (!existingBacklog) {
+            await this.saveBacklogObligation({
+              target_date: dateStr,
+              slot_index: slot,
+              status: 'PENDING'
+            });
+          }
         }
       }
 
@@ -3449,30 +3501,31 @@ class Database {
     const rows = await this.getAllRows(
       `SELECT * FROM daily_shorts_backlog
        WHERE status = 'PENDING' AND target_date < ?
-       ORDER BY target_date ASC`,
+       ORDER BY target_date ASC, slot_index ASC`,
       [todayStr]
     );
 
     return rows;
   }
 
-  async getPendingBacklogObligations(limit = 30) {
+  async getPendingBacklogObligations(limit = 60) {
     const todayStr = new Date().toISOString().slice(0, 10);
     return this.getAllRows(
       `SELECT * FROM daily_shorts_backlog
        WHERE status = 'PENDING' AND target_date < ?
-       ORDER BY target_date ASC LIMIT ?`,
-      [todayStr, Number(limit || 30)]
+       ORDER BY target_date ASC, slot_index ASC LIMIT ?`,
+      [todayStr, Number(limit || 60)]
     );
   }
 
   async saveBacklogObligation(record) {
     if (!record || !record.target_date) return null;
+    const slotIndex = Number(record.slot_index || 1);
     await this.executeQuery(
       `INSERT INTO daily_shorts_backlog (
-        target_date, status, production_id, scheduled_for, attempt_count, last_error, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(target_date) DO UPDATE SET
+        target_date, slot_index, status, production_id, scheduled_for, attempt_count, last_error, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(target_date, slot_index) DO UPDATE SET
         status = COALESCE(excluded.status, daily_shorts_backlog.status),
         production_id = COALESCE(excluded.production_id, daily_shorts_backlog.production_id),
         scheduled_for = COALESCE(excluded.scheduled_for, daily_shorts_backlog.scheduled_for),
@@ -3481,6 +3534,7 @@ class Database {
         updated_at = CURRENT_TIMESTAMP`,
       [
         record.target_date,
+        slotIndex,
         record.status || 'PENDING',
         record.production_id || null,
         record.scheduled_for || null,
@@ -3488,10 +3542,13 @@ class Database {
         record.last_error || null
       ]
     );
-    return this.getRow('SELECT * FROM daily_shorts_backlog WHERE target_date = ?', [record.target_date]);
+    return this.getRow(
+      'SELECT * FROM daily_shorts_backlog WHERE target_date = ? AND slot_index = ?',
+      [record.target_date, slotIndex]
+    );
   }
 
-  async updateBacklogObligation(targetDate, updates = {}) {
+  async updateBacklogObligation(targetDate, updates = {}, slotIndex = null) {
     if (!targetDate) return null;
     const allowed = ['status', 'production_id', 'scheduled_for', 'attempt_count', 'last_error'];
     const fields = [];
@@ -3508,12 +3565,23 @@ class Database {
     fields.push('updated_at = CURRENT_TIMESTAMP');
     values.push(targetDate);
 
+    let whereClause = 'WHERE target_date = ?';
+    if (slotIndex !== null && slotIndex !== undefined) {
+      whereClause += ' AND slot_index = ?';
+      values.push(Number(slotIndex));
+    }
+
     await this.executeQuery(
-      `UPDATE daily_shorts_backlog SET ${fields.join(', ')} WHERE target_date = ?`,
+      `UPDATE daily_shorts_backlog SET ${fields.join(', ')} ${whereClause}`,
       values
     );
 
-    return this.getRow('SELECT * FROM daily_shorts_backlog WHERE target_date = ?', [targetDate]);
+    const lookupSlot = slotIndex !== null && slotIndex !== undefined ? Number(slotIndex) : 1;
+    const row = await this.getRow(
+      'SELECT * FROM daily_shorts_backlog WHERE target_date = ? AND slot_index = ?',
+      [targetDate, lookupSlot]
+    );
+    return row || this.getRow('SELECT * FROM daily_shorts_backlog WHERE target_date = ? LIMIT 1', [targetDate]);
   }
 }
 

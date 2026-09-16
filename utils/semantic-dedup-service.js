@@ -45,11 +45,44 @@ const CONCEPT_SYNONYM_MAP = {
   entity_tesla: ['tesla', 'musk', 'elon'],
   entity_amazon: ['amazon', 'aws', 'bezos'],
   entity_crypto: ['crypto', 'cryptocurrency', 'bitcoin', 'btc', 'ethereum', 'eth', 'blockchain'],
-  
+  entity_costco: ['costco', 'kirkland', 'warehouse club'],
+  entity_payment_network: ['visa', 'mastercard', 'amex', 'swipe fee', 'swipe fees', 'interchange', 'payment network', 'credit card fees', 'debit card'],
+  entity_disney: ['disney', 'theme park', 'parks', 'genie', 'lightning lane'],
+  entity_airlines: ['airline', 'airlines', 'frequent flyer', 'miles', 'flight', 'flights', 'delta', 'united'],
+  entity_fast_food: ['fast food', 'mcdonald', 'mcdonalds', 'wendy', 'wendys', 'value menu', 'dollar menu', 'burger king'],
+  entity_streaming: ['streaming', 'netflix', 'disney+', 'hulu', 'hbo', 'subscription', 'price-hike', 'subscriptions'],
+
+  // Core Financial Concepts
+  concept_swipe_fees: ['swipe fee', 'swipe fees', 'interchange', 'merchant fee', 'processing fee', 'hidden fee', 'hidden fees'],
+  concept_membership_model: ['membership', 'memberships', 'membership model', 'annual fee', 'membership fee', 'warehouse club'],
+  concept_profit_margin: ['margin', 'margins', 'profit margin', 'gross margin', 'operating margin', 'markup', 'markups', 'retail profit'],
+  concept_ticket_pricing: ['ticket', 'tickets', 'pricing', 'genie', 'lightning lane', 'surge pricing', 'dynamic pricing', 'ticket pricing'],
+  concept_compute_moat: ['moat', 'compute moat', 'cuda', 'gpu moat', 'ai moat', 'trillion dollar'],
+  concept_frequent_flyer: ['frequent flyer', 'miles', 'loyalty program', 'airline miles', 'mileage program'],
+  concept_value_menu: ['value menu', 'dollar menu', 'loss leader', 'menu pricing', 'cheap menu', 'value menus'],
+  concept_subscription_hikes: ['price hike', 'price hikes', 'price-hike', 'subscription hike', 'price increase', 'password sharing', 'subscription'],
+
   // Workflow & Habits
   concept_habit: ['habit', 'habits', 'routine', 'routines', 'ritual', 'rituals', 'practice', 'practices', 'discipline'],
   concept_productivity: ['productivity', 'productive', 'focus', 'time management', 'efficiency', 'work faster'],
   concept_mistake: ['mistake', 'mistakes', 'error', 'errors', 'trap', 'traps', 'pitfall', 'pitfalls', 'blunder', 'avoid']
+};
+
+// Money In Minutes Niche Categories
+const MONEY_IN_MINUTES_CATEGORIES = {
+  MONEY: 'money',
+  BUSINESS: 'business',
+  TECHNOLOGY: 'technology',
+  BRANDS: 'brands',
+  SURPRISING_FINANCIAL_FACTS: 'surprising_financial_facts'
+};
+
+const CATEGORY_KEYWORDS = {
+  money: ['fee', 'fees', 'swipe', 'interchange', 'credit card', 'debit', 'payment', 'payments', 'bank', 'banking', 'interest', 'apr', 'loan', 'mortgage', 'debt', 'cash', 'inflation', 'visa', 'mastercard', 'amex', 'wall street'],
+  business: ['pricing', 'model', 'ticket', 'disney', 'airline', 'airlines', 'miles', 'frequent flyer', 'monopoly', 'margin', 'margins', 'economics', 'revenue', 'profit', 'profits', 'corporate', 'strategy', 'subscription', 'subscriptions', 'streaming', 'netflix', 'price-hike', 'hike'],
+  technology: ['apple', 'iphone', 'mac', 'nvidia', 'gpu', 'chips', 'semiconductor', 'ai', 'cloud', 'software', 'compute', 'hardware', 'intel', 'microsoft', 'google', 'meta', 'moat', 'datacenter'],
+  brands: ['costco', 'walmart', 'starbucks', 'nike', 'amazon', 'target', 'ikea', 'kirkland', 'retail', 'warehouse', 'wholesale', 'membership', 'groceries', 'store', 'luxury', 'hermes', 'rolex'],
+  surprising_financial_facts: ['fast food', 'menu', 'value menu', 'value menus', 'mcdonalds', 'mcdonald', 'burger king', 'wendys', 'dollar menu', 'rotisserie', 'chicken', 'loss leader', 'shrinkflation', 'hidden cost', 'psychology', 'disappearing', 'math']
 };
 
 // Structural stop words to remove (keeps high-signal intent words)
@@ -75,7 +108,12 @@ for (const [conceptId, synonyms] of Object.entries(CONCEPT_SYNONYM_MAP)) {
 
 // Known entity concept groups for conflict detection
 const ENTITY_GROUPS = [
-  new Set(['entity_apple', 'entity_intel', 'entity_apple_silicon', 'entity_nvidia', 'entity_microsoft', 'entity_google', 'entity_tesla', 'entity_amazon', 'entity_crypto'])
+  new Set([
+    'entity_apple', 'entity_intel', 'entity_apple_silicon', 'entity_nvidia',
+    'entity_microsoft', 'entity_google', 'entity_tesla', 'entity_amazon',
+    'entity_crypto', 'entity_costco', 'entity_payment_network', 'entity_disney',
+    'entity_airlines', 'entity_fast_food', 'entity_streaming'
+  ])
 ];
 
 class SemanticDedupService {
@@ -545,9 +583,334 @@ class SemanticDedupService {
     }
     return '';
   }
+
+  /**
+   * Classifies a topic into one of the 5 Money In Minutes niche categories.
+   * @param {string|Object} item
+   * @returns {string} Category: 'money', 'business', 'technology', 'brands', or 'surprising_financial_facts'
+   */
+  resolveCategory(item) {
+    const text = (typeof item === 'string' ? item : (item?.topic || item?.title || '')).toLowerCase();
+    if (!text) return MONEY_IN_MINUTES_CATEGORIES.BUSINESS;
+
+    // Direct entity checks first
+    if (text.includes('costco') || text.includes('warehouse club') || text.includes('ikea') || text.includes('walmart') || text.includes('retail markups')) {
+      return MONEY_IN_MINUTES_CATEGORIES.BRANDS;
+    }
+    if (text.includes('visa') || text.includes('mastercard') || text.includes('swipe fee') || text.includes('interchange') || text.includes('credit card') || text.includes('debit')) {
+      return MONEY_IN_MINUTES_CATEGORIES.MONEY;
+    }
+    if (text.includes('nvidia') || text.includes('apple') || text.includes('iphone') || text.includes('gpu') || text.includes('chips') || text.includes('semiconductor') || text.includes('ai compute')) {
+      return MONEY_IN_MINUTES_CATEGORIES.TECHNOLOGY;
+    }
+    if (text.includes('fast food') || text.includes('dollar menu') || text.includes('value menu') || text.includes('mcdonald') || text.includes('rotisserie') || text.includes('shrinkflation')) {
+      return MONEY_IN_MINUTES_CATEGORIES.SURPRISING_FINANCIAL_FACTS;
+    }
+    if (text.includes('disney') || text.includes('ticket') || text.includes('airline') || text.includes('miles') || text.includes('frequent flyer') || text.includes('streaming') || text.includes('subscription')) {
+      return MONEY_IN_MINUTES_CATEGORIES.BUSINESS;
+    }
+
+    // Keyword score matching across categories
+    let bestCategory = MONEY_IN_MINUTES_CATEGORIES.BUSINESS;
+    let highestScore = 0;
+
+    for (const [category, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
+      let score = 0;
+      for (const kw of keywords) {
+        if (text.includes(kw)) {
+          score += kw.includes(' ') ? 3 : 1;
+        }
+      }
+      if (score > highestScore) {
+        highestScore = score;
+        bestCategory = category;
+      }
+    }
+
+    return bestCategory;
+  }
+
+  /**
+   * Extracts distinct named business, tech, and brand entities from text.
+   * @param {string} text
+   * @returns {string[]}
+   */
+  extractEntities(text) {
+    const norm = (text || '').toLowerCase();
+    const entities = [];
+    for (const [conceptId, synonyms] of Object.entries(CONCEPT_SYNONYM_MAP)) {
+      if (conceptId.startsWith('entity_')) {
+        for (const syn of synonyms) {
+          if (norm.includes(syn)) {
+            entities.push(conceptId);
+            break;
+          }
+        }
+      }
+    }
+    return entities;
+  }
+
+  /**
+   * Extracts core financial concepts from text.
+   * @param {string} text
+   * @returns {string[]}
+   */
+  extractFinancialConcepts(text) {
+    const norm = (text || '').toLowerCase();
+    const concepts = [];
+    for (const [conceptId, synonyms] of Object.entries(CONCEPT_SYNONYM_MAP)) {
+      if (conceptId.startsWith('concept_') || conceptId.startsWith('finance_')) {
+        for (const syn of synonyms) {
+          if (norm.includes(syn)) {
+            concepts.push(conceptId);
+            break;
+          }
+        }
+      }
+    }
+    return concepts;
+  }
+
+  /**
+   * Extracts a structured content profile for multi-dimensional comparison.
+   * @param {string|Object} item
+   * @returns {Object} Content profile
+   */
+  extractContentProfile(item) {
+    const topic = this._extractTopicText(item);
+    const category = item?.category || this.resolveCategory(item);
+    const entities = this.extractEntities(topic + ' ' + (item?.description || ''));
+    const concepts = this.extractFinancialConcepts(topic + ' ' + (item?.description || ''));
+
+    return {
+      topic,
+      normalizedTopic: this.normalizeTopic(topic),
+      category,
+      entities,
+      concepts,
+      scriptText: item?.scriptText || item?.script?.fullScript || '',
+      claims: Array.isArray(item?.claims) ? item.claims : [],
+      hook: item?.hook || item?.script?.hook?.text || ''
+    };
+  }
+
+  /**
+   * Compares two content profiles across topics, categories, entities, concepts, and scripts.
+   * @param {Object} profileA
+   * @param {Object} profileB
+   * @returns {Object} Comparison result
+   */
+  compareContentProfiles(profileA, profileB) {
+    const sim = this.calculateHybridSimilarity(profileA.topic, profileB.topic);
+    const sameCategory = profileA.category === profileB.category;
+
+    const setEntA = new Set(profileA.entities);
+    const sharedEntities = profileB.entities.filter(e => setEntA.has(e));
+
+    const setConA = new Set(profileA.concepts);
+    const sharedConcepts = profileB.concepts.filter(c => setConA.has(c));
+
+    let finalScore = sim.score;
+    let reason = 'DIFFERENT_CONTENT';
+
+    // 1. Exact or near-identical topic match
+    if (sim.isExact || sim.score >= 0.85) {
+      finalScore = Math.max(finalScore, 0.95);
+      reason = 'IDENTICAL_OR_REWORDED_TOPIC';
+    }
+    // 2. Same entity + same financial concept (e.g. Visa swipe fees renamed)
+    else if (sharedEntities.length > 0 && sharedConcepts.length > 0) {
+      finalScore = Math.max(finalScore, 0.88);
+      reason = 'SAME_ENTITY_AND_FINANCIAL_CONCEPT';
+    }
+    // 3. Same category + same core concept (e.g. another swipe fee story)
+    else if (sameCategory && sharedConcepts.length > 0) {
+      finalScore = Math.max(finalScore, 0.80);
+      reason = 'SAME_CATEGORY_AND_FINANCIAL_ANGLE';
+    }
+    // 4. Same entity clash (e.g. two Apple stories in a row)
+    else if (sharedEntities.length > 0 && sim.score >= 0.50) {
+      finalScore = Math.max(finalScore, 0.72);
+      reason = 'SHARED_KEY_ENTITY';
+    }
+
+    // 5. Script / Claim comparison if available
+    if (profileA.scriptText && profileB.scriptText) {
+      const scriptSim = this.calculateLexicalSimilarity(profileA.scriptText, profileB.scriptText);
+      if (scriptSim >= 0.70) {
+        finalScore = Math.max(finalScore, 0.90);
+        reason = 'NEAR_DUPLICATE_SCRIPT';
+      }
+    }
+
+    return {
+      score: Number(finalScore.toFixed(4)),
+      semanticDistance: Number((1.0 - finalScore).toFixed(4)),
+      isDuplicate: finalScore >= this.duplicateThreshold,
+      reason,
+      sameCategory,
+      sharedEntities,
+      sharedConcepts,
+      topicSimilarity: sim.score
+    };
+  }
+
+  /**
+   * Evaluates candidate topic/content against a rolling recent-content memory.
+   * Rejects candidates that are rewordings, same stories, or too close semantically.
+   * @param {string|Object} candidate
+   * @param {Array<string|Object>} recentHistory
+   * @param {Object} [options={}]
+   * @returns {Object} Evaluation report
+   */
+  evaluateContentCandidate(candidate, recentHistory = [], options = {}) {
+    const candidateProfile = this.extractContentProfile(candidate);
+    if (!candidateProfile.topic) {
+      return { isDuplicate: false, reason: 'EMPTY_TOPIC', score: 0.0, candidateProfile };
+    }
+
+    const threshold = options.threshold ?? this.duplicateThreshold;
+    let highestScore = 0.0;
+    let worstMatch = null;
+    let rejectionReason = null;
+
+    for (const historicalItem of recentHistory) {
+      const histProfile = this.extractContentProfile(historicalItem);
+      if (!histProfile.topic) continue;
+
+      const comp = this.compareContentProfiles(candidateProfile, histProfile);
+      if (comp.score > highestScore) {
+        highestScore = comp.score;
+        worstMatch = histProfile.topic;
+        if (comp.isDuplicate) {
+          rejectionReason = comp.reason;
+        }
+      }
+
+      if (comp.score >= 0.95) break;
+    }
+
+    const isDup = highestScore >= threshold;
+
+    return {
+      isDuplicate: isDup,
+      score: highestScore,
+      semanticDistance: Number((1.0 - highestScore).toFixed(4)),
+      reason: isDup ? (rejectionReason || 'SEMANTIC_SIMILARITY_EXCEEDED') : 'PASSED_DEDUP_GATE',
+      matchedTopic: isDup ? worstMatch : null,
+      category: candidateProfile.category,
+      entities: candidateProfile.entities,
+      concepts: candidateProfile.concepts
+    };
+  }
+
+  /**
+   * Enforces topic diversity across the daily batch and recent history.
+   * Specifically guarantees that Short #1 and Short #2 of the same day:
+   * - Belong to different content categories
+   * - Do not feature the same key company/entity
+   * - Maintain a minimum semantic distance > 0.40
+   * @param {string|Object} candidate
+   * @param {Array<string|Object>|string|Object} todayBatchTopics
+   * @param {Array<string|Object>} [recentHistory=[]]
+   * @returns {Object} Diversity assessment
+   */
+  classifyTopic(topic) {
+    const profile = this.extractContentProfile(topic);
+    return profile.category;
+  }
+
+  enforceTopicDiversity(candidate, todayBatchTopics = [], recentHistory = []) {
+    const candidateProfile = this.extractContentProfile(candidate);
+    const batchList = Array.isArray(todayBatchTopics)
+      ? todayBatchTopics
+      : (typeof todayBatchTopics === 'string' || (todayBatchTopics && typeof todayBatchTopics === 'object'))
+        ? [todayBatchTopics]
+        : [];
+    const historyList = Array.isArray(recentHistory)
+      ? recentHistory
+      : (typeof recentHistory === 'string' || (recentHistory && typeof recentHistory === 'object'))
+        ? [recentHistory]
+        : [];
+
+    // 1. Check against today's already scheduled/produced Shorts in this daily batch
+    for (const existing of batchList) {
+      const existingProfile = this.extractContentProfile(existing);
+      if (!existingProfile.topic) continue;
+
+      const comp = this.compareContentProfiles(candidateProfile, existingProfile);
+
+      // Intra-day Category Diversity Check
+      if (candidateProfile.category === existingProfile.category) {
+        return {
+          isDiverse: false,
+          categoryDiverse: false,
+          allowed: false,
+          reason: `CATEGORY_COLLISION: Both Shorts would be in category '${candidateProfile.category}'`,
+          candidateCategory: candidateProfile.category,
+          collidingTopic: existingProfile.topic,
+          semanticDistance: comp.semanticDistance
+        };
+      }
+
+      // Intra-day Entity Collision Check
+      if (comp.sharedEntities.length > 0) {
+        return {
+          isDiverse: false,
+          categoryDiverse: true,
+          allowed: false,
+          reason: `ENTITY_COLLISION: Shares entity [${comp.sharedEntities.join(', ')}] with today's other Short`,
+          candidateCategory: candidateProfile.category,
+          collidingTopic: existingProfile.topic,
+          semanticDistance: comp.semanticDistance
+        };
+      }
+
+      // Intra-day Semantic Distance Check (minimum distance 0.40 / max similarity 0.60)
+      if (comp.score > 0.60) {
+        return {
+          isDiverse: false,
+          categoryDiverse: true,
+          allowed: false,
+          reason: `INSUFFICIENT_SEMANTIC_DISTANCE: Similarity ${comp.score} exceeds 0.60 threshold`,
+          candidateCategory: candidateProfile.category,
+          collidingTopic: existingProfile.topic,
+          semanticDistance: comp.semanticDistance
+        };
+      }
+    }
+
+    // 2. Check general deduplication against rolling historical memory
+    const historyCheck = this.evaluateContentCandidate(candidate, historyList);
+    if (historyCheck.isDuplicate) {
+      return {
+        isDiverse: false,
+        categoryDiverse: true,
+        allowed: false,
+        reason: `HISTORICAL_DUPLICATE: ${historyCheck.reason} (matched: "${historyCheck.matchedTopic}")`,
+        candidateCategory: candidateProfile.category,
+        collidingTopic: historyCheck.matchedTopic,
+        semanticDistance: historyCheck.semanticDistance
+      };
+    }
+
+    return {
+      isDiverse: true,
+      categoryDiverse: true,
+      allowed: true,
+      reason: 'ACCEPTED_DIVERSE_TOPIC',
+      candidateCategory: candidateProfile.category,
+      entities: candidateProfile.entities,
+      concepts: candidateProfile.concepts,
+      semanticDistance: historyCheck.semanticDistance
+    };
+  }
 }
 
 module.exports = {
   SemanticDedupService,
-  CONCEPT_SYNONYM_MAP
+  CONCEPT_SYNONYM_MAP,
+  MONEY_IN_MINUTES_CATEGORIES,
+  CATEGORY_KEYWORDS
 };

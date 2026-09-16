@@ -36,7 +36,8 @@ class DailyShortsPublisher {
     this.scratchDir = options.scratchDir || path.join(this.projectRoot, 'scratch', 'daily_shorts');
 
     this.dailyPublishTime = options.dailyPublishTime || process.env.DAILY_SHORT_PUBLISH_TIME || '17:00';
-    this.dailyMinimum = Number(options.dailyMinimum || process.env.DAILY_SHORT_MINIMUM || 1);
+    this.dailyMinimum = Number(options.dailyMinimum || process.env.DAILY_SHORTS_TARGET_COUNT || process.env.DAILY_SHORT_MINIMUM || 2);
+    this.targetCount = Number(options.targetCount || process.env.DAILY_SHORTS_TARGET_COUNT || this.dailyMinimum || 2);
     this.maxCandidateAttempts = Number(options.maxCandidateAttempts || 3);
     this.maxUploadAttempts = Number(options.maxUploadAttempts || 3);
   }
@@ -85,10 +86,12 @@ class DailyShortsPublisher {
 
   /**
    * Discovers and returns the next eligible topic candidate that is not a duplicate.
+   * Enforces multi-dimensional semantic deduplication and cross-slot category diversity.
    * @param {Array<string>} [excludedTopics=[]]
+   * @param {string|null} [priorTopicInBatch=null]
    * @returns {Promise<string>}
    */
-  async discoverNextTopic(excludedTopics = []) {
+  async discoverNextTopic(excludedTopics = [], priorTopicInBatch = null) {
     await this.initialize();
 
     const recentRecords = await this.db.listDailyShortPublications({ limit: 100 });
@@ -101,6 +104,14 @@ class DailyShortsPublisher {
     for (const candidate of CURATED_TOPIC_POOL) {
       if (allExcluded.includes(candidate)) continue;
 
+      // Enforce category diversity if another topic is produced in the same batch
+      if (priorTopicInBatch) {
+        const diversityCheck = this.dedupService.enforceTopicDiversity(priorTopicInBatch, candidate);
+        if (!diversityCheck.allowed) {
+          continue;
+        }
+      }
+
       const dupCheck = this.dedupService.isDuplicate(candidate, allExcluded);
       if (!dupCheck.isDuplicate) {
         const dbDup = await this.db.isDailyShortTopicDuplicate(candidate, 90);
@@ -110,8 +121,8 @@ class DailyShortsPublisher {
       }
     }
 
-    // Fallback: append date tag if pool is exhausted
-    const fallback = `Market Pulse: Modern Consumer Finance & Business Tactics (${new Date().toISOString().slice(0, 10)})`;
+    // Fallback if pool is exhausted: generate unique topic with timestamp
+    const fallback = `Market Pulse: Consumer Finance & Business Tactics (${new Date().toISOString().slice(0, 10)} - ${Date.now()})`;
     return fallback;
   }
 
@@ -194,18 +205,21 @@ class DailyShortsPublisher {
 
     const results = [];
     const excludedTopics = [];
+    let priorTopic = null;
     let recoveredCount = 0;
 
     // Sequential processing: 1 video at a time
     for (let i = 0; i < pending.length; i++) {
       const obligation = pending[i];
       const targetDate = obligation.target_date;
-      this.logger.info(`\n[Backlog Recovery] Processing missed obligation ${i + 1}/${pending.length} for date: ${targetDate}`);
+      const slotIndex = obligation.slot_index || 1;
+      this.logger.info(`\n[Backlog Recovery] Processing missed obligation ${i + 1}/${pending.length} for date: ${targetDate} (Slot ${slotIndex})`);
 
       try {
-        // 1. Discover genuinely fresh topic
-        const topic = await this.discoverNextTopic(excludedTopics);
+        // 1. Discover genuinely fresh topic respecting diversity
+        const topic = await this.discoverNextTopic(excludedTopics, priorTopic);
         excludedTopics.push(topic);
+        priorTopic = topic;
 
         // 2. Generate candidate and run 17-point QA
         const prodResult = await this.generateCandidate(topic, options);
@@ -214,13 +228,13 @@ class DailyShortsPublisher {
           await this.db.updateBacklogObligation(targetDate, {
             attempt_count: (obligation.attempt_count || 0) + 1,
             last_error: errMessage
-          });
-          results.push({ targetDate, success: false, error: errMessage });
-          this.logger.warn(`[Backlog Recovery] Generation failed for date ${targetDate}. Obligation remains PENDING.`);
+          }, slotIndex);
+          results.push({ targetDate, slotIndex, success: false, error: errMessage });
+          this.logger.warn(`[Backlog Recovery] Generation failed for date ${targetDate} (Slot ${slotIndex}). Obligation remains PENDING.`);
           continue;
         }
 
-        // 3. Allocate unique future publish timestamp
+        // 3. Allocate unique future publish timestamp (sequential days into future)
         const scheduledTime = this.calculateNextAvailablePublishTime(new Date(), i + 1);
 
         // 4. Publish / schedule candidate
@@ -235,11 +249,12 @@ class DailyShortsPublisher {
           production_id: prodResult.productionId,
           scheduled_for: scheduledTime,
           last_error: null
-        });
+        }, slotIndex);
 
         recoveredCount++;
         results.push({
           targetDate,
+          slotIndex,
           success: true,
           productionId: prodResult.productionId,
           topic,
@@ -247,14 +262,14 @@ class DailyShortsPublisher {
           status: pubResult.status
         });
 
-        this.logger.success(`[Backlog Recovery] Successfully recovered missed obligation for ${targetDate} (Scheduled for: ${scheduledTime})`);
+        this.logger.success(`[Backlog Recovery] Successfully recovered missed obligation for ${targetDate} (Slot ${slotIndex}) (Scheduled for: ${scheduledTime})`);
       } catch (recoveryErr) {
-        this.logger.error(`[Backlog Recovery] Failed to recover missed obligation for ${targetDate}:`, recoveryErr);
+        this.logger.error(`[Backlog Recovery] Failed to recover missed obligation for ${targetDate} (Slot ${slotIndex}):`, recoveryErr);
         await this.db.updateBacklogObligation(targetDate, {
           attempt_count: (obligation.attempt_count || 0) + 1,
           last_error: recoveryErr.message
-        });
-        results.push({ targetDate, success: false, error: recoveryErr.message });
+        }, slotIndex);
+        results.push({ targetDate, slotIndex, success: false, error: recoveryErr.message });
         // Obligation remains PENDING in database
       }
     }
@@ -553,7 +568,8 @@ class DailyShortsPublisher {
 
   /**
    * Executes the full daily publishing cycle with retry guarantees and missed-day recovery.
-   * Guarantees all missed backlog obligations are recovered AND at least 1 Short is scheduled/published for today.
+   * Guarantees all missed backlog obligations are recovered AND exactly targetCount (default 2)
+   * independent Shorts are scheduled/published for today at the daily publishing time (10:30 PM IST / 17:00 UTC).
    * @param {Object} [options={}]
    * @returns {Promise<Object>} Execution report
    */
@@ -578,6 +594,7 @@ class DailyShortsPublisher {
       return {
         completed: true,
         quotaMet: true,
+        targetCount: this.dailyMinimum,
         backlogRecovery: backlogReport,
         publishedCount: status.publishedCount,
         scheduledCount: status.scheduledCount,
@@ -585,81 +602,118 @@ class DailyShortsPublisher {
       };
     }
 
-    const cycleAttempts = [];
-    const excludedTopics = [];
-    let cycleSuccess = false;
-    let successfulRecord = null;
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const slotsCompleted = status.records.filter(r => ['SCHEDULED', 'PUBLISHED', 'READY_TO_PUBLISH'].includes(r.status)).length;
+    const startSlot = options.force ? 1 : slotsCompleted + 1;
+    const totalSlots = this.dailyMinimum;
 
-    for (let candidateIdx = 1; candidateIdx <= this.maxCandidateAttempts; candidateIdx++) {
-      this.logger.info(`\n--- Daily Cycle Attempt ${candidateIdx}/${this.maxCandidateAttempts} ---`);
+    const cycleResults = [];
+    const excludedTopics = status.records.map(r => r.topic).filter(Boolean);
+    let priorTopicInBatch = status.records.length > 0 ? status.records[status.records.length - 1].topic : null;
 
-      // 1. Discover fresh topic
-      const topic = options.topic || await this.discoverNextTopic(excludedTopics);
-      excludedTopics.push(topic);
+    // Both Shorts are scheduled for the exact same daily publishing time: 10:30 PM IST (17:00 UTC)
+    const todayPublishTime = options.scheduledPublishTime || this.calculateScheduledPublishTime(new Date());
 
-      // 2. Produce candidate & verify QA
-      const prodResult = await this.generateCandidate(topic, options);
-      cycleAttempts.push({
-        attempt: candidateIdx,
-        topic,
-        productionId: prodResult.productionId,
-        qaPassed: prodResult.success,
-        error: prodResult.error || null
-      });
+    for (let slotIndex = startSlot; slotIndex <= totalSlots; slotIndex++) {
+      this.logger.info(`\n=== Processing Daily Short Slot ${slotIndex}/${totalSlots} ===`);
+      let slotSuccess = false;
+      let slotRecord = null;
+      const slotAttempts = [];
 
-      if (!prodResult.success) {
-        this.logger.warn(`Candidate ${candidateIdx} rejected by QA gate. Generating replacement topic...`);
-        continue;
-      }
+      for (let candidateIdx = 1; candidateIdx <= this.maxCandidateAttempts; candidateIdx++) {
+        this.logger.info(`--- Slot ${slotIndex} Candidate Attempt ${candidateIdx}/${this.maxCandidateAttempts} ---`);
 
-      // 3. Publish candidate with retry loop on transient upload errors
-      let uploadSuccess = false;
-      for (let uploadIdx = 1; uploadIdx <= this.maxUploadAttempts; uploadIdx++) {
-        try {
-          const pubResult = await this.publishCandidate(prodResult.productionId, options);
-          uploadSuccess = true;
-          successfulRecord = pubResult.record;
-          break;
-        } catch (uploadErr) {
-          this.logger.warn(`Upload attempt ${uploadIdx}/${this.maxUploadAttempts} failed: ${uploadErr.message}`);
-          if (uploadIdx < this.maxUploadAttempts) {
-            // Wait 2000ms * uploadIdx before retrying upload
-            await new Promise(r => setTimeout(r, 1000 * uploadIdx));
+        // 1. Discover fresh topic enforcing cross-slot category diversity
+        const topic = (slotIndex === 1 && options.topic)
+          ? options.topic
+          : await this.discoverNextTopic(excludedTopics, priorTopicInBatch);
+        excludedTopics.push(topic);
+
+        // 2. Produce candidate & verify QA
+        const prodResult = await this.generateCandidate(topic, options);
+        slotAttempts.push({
+          slotIndex,
+          attempt: candidateIdx,
+          topic,
+          productionId: prodResult.productionId,
+          qaPassed: prodResult.success,
+          error: prodResult.error || null
+        });
+
+        if (!prodResult.success) {
+          this.logger.warn(`Slot ${slotIndex} candidate ${candidateIdx} rejected by QA gate. Generating replacement topic...`);
+          continue;
+        }
+
+        // 3. Publish candidate with retry loop on transient upload errors
+        let uploadSuccess = false;
+        for (let uploadIdx = 1; uploadIdx <= this.maxUploadAttempts; uploadIdx++) {
+          try {
+            const pubResult = await this.publishCandidate(prodResult.productionId, {
+              ...options,
+              scheduledPublishTime: todayPublishTime
+            });
+            uploadSuccess = true;
+            slotRecord = pubResult.record;
+            break;
+          } catch (uploadErr) {
+            this.logger.warn(`Slot ${slotIndex} upload attempt ${uploadIdx}/${this.maxUploadAttempts} failed: ${uploadErr.message}`);
+            if (uploadIdx < this.maxUploadAttempts) {
+              await new Promise(r => setTimeout(r, 1000 * uploadIdx));
+            }
           }
+        }
+
+        if (uploadSuccess) {
+          slotSuccess = true;
+          priorTopicInBatch = topic;
+          // Record slot obligation as satisfied in backlog
+          await this.db.saveBacklogObligation({
+            target_date: todayStr,
+            slot_index: slotIndex,
+            status: 'SATISFIED',
+            production_id: slotRecord?.production_id,
+            scheduled_for: slotRecord?.scheduled_at || todayPublishTime
+          });
+          break;
+        } else {
+          this.logger.error(`All upload attempts failed for candidate ${prodResult.productionId}. Trying replacement candidate...`);
         }
       }
 
-      if (uploadSuccess) {
-        cycleSuccess = true;
-        // Record today's obligation as satisfied in backlog
-        const todayStr = new Date().toISOString().slice(0, 10);
-        await this.db.saveBacklogObligation({
-          target_date: todayStr,
-          status: 'SATISFIED',
-          production_id: successfulRecord?.production_id,
-          scheduled_for: successfulRecord?.scheduled_at
-        });
-        break;
-      } else {
-        this.logger.error(`All upload attempts failed for candidate ${prodResult.productionId}. Trying replacement candidate...`);
+      cycleResults.push({
+        slotIndex,
+        success: slotSuccess,
+        record: slotRecord,
+        attempts: slotAttempts
+      });
+
+      if (!slotSuccess) {
+        this.logger.error(`Failed to complete Short for Slot ${slotIndex} after ${this.maxCandidateAttempts} candidate attempts.`);
       }
     }
 
+    const updatedStatus = await this.checkDailyStatus();
+    const allSlotsCompleted = updatedStatus.totalCompleted >= this.dailyMinimum;
+
     const finalReport = {
       timestamp: new Date().toISOString(),
-      completed: cycleSuccess || status.hasMetDailyQuota,
-      quotaMet: cycleSuccess || status.hasMetDailyQuota,
+      targetCount: this.dailyMinimum,
+      completedCount: updatedStatus.totalCompleted,
+      quotaMet: allSlotsCompleted,
+      completed: allSlotsCompleted,
       backlogRecovery: backlogReport,
-      todayCompleted: cycleSuccess,
-      attempts: cycleAttempts,
-      record: successfulRecord,
+      slots: cycleResults,
+      publishedCount: updatedStatus.publishedCount,
+      scheduledCount: updatedStatus.scheduledCount,
+      records: updatedStatus.records,
       publishingEnabled: process.env.YOUTUBE_PUBLISH_ENABLED === 'true' || options.forcePublish === true
     };
 
     if (finalReport.completed) {
-      this.logger.success('=== Daily Shorts Publishing Cycle Finished Successfully ===');
+      this.logger.success(`=== Daily Shorts Publishing Cycle Finished Successfully (${updatedStatus.totalCompleted}/${this.dailyMinimum} completed) ===`);
     } else {
-      this.logger.error('=== Daily Shorts Publishing Cycle Failed to meet daily quota ===');
+      this.logger.error(`=== Daily Shorts Publishing Cycle Incomplete (${updatedStatus.totalCompleted}/${this.dailyMinimum} completed) ===`);
     }
 
     return finalReport;

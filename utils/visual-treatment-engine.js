@@ -2567,6 +2567,17 @@ ${events}
     `.trim();
   }
 
+  escapeAssPath(assPath) {
+    if (!assPath) return '';
+    return assPath.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
+  }
+
+  buildAssSubtitleFilter(assPath) {
+    if (!assPath) return 'format=yuv420p';
+    const escaped = this.escapeAssPath(assPath);
+    return `subtitles='${escaped}',format=yuv420p`;
+  }
+
   /**
    * Renders in-scene micro-animated frames and composites them in real-time over the moving B-roll background.
    */
@@ -2594,7 +2605,8 @@ ${events}
       '-filter_complex', filterComplex,
       '-t', Number(duration).toFixed(2),
       '-c:v', 'libx264',
-      '-preset', 'ultrafast',
+      '-preset', 'fast',
+      '-crf', '18',
       '-pix_fmt', 'yuv420p',
       outputPath
     ]);
@@ -2666,8 +2678,8 @@ ${events}
               '-i', tempPresenterVideo,
               '-vf', vf,
               '-c:v', 'libx264',
-              '-preset', 'veryfast',
-              '-crf', '19',
+              '-preset', 'fast',
+              '-crf', '18',
               '-pix_fmt', 'yuv420p',
               outputPath
             ];
@@ -2707,8 +2719,8 @@ ${events}
             '-i', broll.brollPath,
             '-vf', vf,
             '-c:v', 'libx264',
-            '-preset', 'veryfast',
-            '-crf', '19',
+            '-preset', 'fast',
+            '-crf', '18',
             '-pix_fmt', 'yuv420p',
             outputPath
           ];
@@ -2751,8 +2763,8 @@ ${events}
           '-vf', vf,
           '-t', Number(plan.duration).toFixed(2),
           '-c:v', 'libx264',
-          '-preset', 'veryfast',
-          '-crf', '20',
+          '-preset', 'fast',
+          '-crf', '18',
           '-r', '30',
           '-pix_fmt', 'yuv420p',
           outputPath
@@ -2818,7 +2830,18 @@ ${events}
 
             const xfadeArgs = ['-y'];
             for (const clip of sceneClips) xfadeArgs.push('-i', clip);
-            xfadeArgs.push('-filter_complex', filterGraph, '-map', '[vout]', '-c:v', 'libx264', '-preset', 'veryfast', assembledVideo);
+            xfadeArgs.push(
+              '-filter_complex', filterGraph,
+              '-map', '[vout]',
+              '-c:v', 'libx264',
+              '-preset', 'fast',
+              '-crf', '18',
+              '-b:v', '8000k',
+              '-maxrate', '12000k',
+              '-bufsize', '16000k',
+              '-pix_fmt', 'yuv420p',
+              assembledVideo
+            );
             await this.runFFmpeg(xfadeArgs);
             assembled = true;
           } catch (xfadeErr) {
@@ -2831,7 +2854,18 @@ ${events}
           const concatFilter = `${filterInputs}concat=n=${sceneClips.length}:v=1:a=0[vout]`;
           const concatArgs = ['-y'];
           for (const clip of sceneClips) concatArgs.push('-i', clip);
-          concatArgs.push('-filter_complex', concatFilter, '-map', '[vout]', '-c:v', 'libx264', '-preset', 'veryfast', assembledVideo);
+          concatArgs.push(
+            '-filter_complex', concatFilter,
+            '-map', '[vout]',
+            '-c:v', 'libx264',
+            '-preset', 'fast',
+            '-crf', '18',
+            '-b:v', '8000k',
+            '-maxrate', '12000k',
+            '-bufsize', '16000k',
+            '-pix_fmt', 'yuv420p',
+            assembledVideo
+          );
           await this.runFFmpeg(concatArgs);
         }
       }
