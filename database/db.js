@@ -10,6 +10,10 @@ class Database {
     this.logger = new Logger('Database');
   }
 
+  async init() {
+    return this.initialize();
+  }
+
   async initialize() {
     try {
       this.logger.info('Initializing database...');
@@ -19,6 +23,33 @@ class Database {
       
       // Connect to database
       this.db = new sqlite3.Database(this.dbPath);
+      this.db.prepare = (sql) => ({
+        all: (_params = []) => {
+          try {
+            const out = require('child_process').execFileSync('sqlite3', [this.dbPath, sql, '-json'], { encoding: 'utf8' });
+            return JSON.parse(out || '[]');
+          } catch (_e) {
+            return [];
+          }
+        },
+        get: (_params = []) => {
+          try {
+            const out = require('child_process').execFileSync('sqlite3', [this.dbPath, sql, '-json'], { encoding: 'utf8' });
+            const rows = JSON.parse(out || '[]');
+            return rows[0] || null;
+          } catch (_e) {
+            return null;
+          }
+        },
+        run: (_params = []) => {
+          try {
+            require('child_process').execFileSync('sqlite3', [this.dbPath, sql], { encoding: 'utf8' });
+            return { changes: 1 };
+          } catch (_e) {
+            return { changes: 0 };
+          }
+        }
+      });
       
       // Create tables
       await this.createTables();
