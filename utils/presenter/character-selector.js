@@ -12,7 +12,11 @@ const PRESENTERS = {
     name: 'David Chen',
     title: 'Consumer Finance Specialist',
     domain: 'consumer_finance',
-    keywords: ['subscription', 'bank', 'spend', 'bill', 'consumer', 'save', 'budget', 'drain', 'card', 'debt', 'trap'],
+    keywords: [
+      'subscription', 'bank', 'spend', 'bill', 'consumer', 'save', 'budget',
+      'drain', 'card', 'debt', 'trap', 'pricing', 'ticket', 'disney',
+      'theme park', 'airline', 'miles', 'fast food', 'value menu'
+    ],
     portraitFile: 'david_chen.jpg',
     recommendedVoice: 'en-US-GuyNeural',
     persona: 'Relatable, sharp, investigative consumer advocate'
@@ -35,7 +39,8 @@ const PRESENTERS = {
     keywords: [
       'tech', 'nvidia', 'ai', 'market cap', 'revenue', 'chips', 'valuation',
       'margin', 'growth', 'data', 'algorithm', 'model', 'corporate',
-      'economics', 'business', 'profit', 'costco', 'retail', 'wholesale', 'membership'
+      'economics', 'business', 'profit', 'costco', 'retail', 'wholesale', 'membership',
+      'apple', 'iphone', 'hardware'
     ],
     portraitFile: 'elena_rostova.jpg',
     recommendedVoice: 'en-US-AriaNeural',
@@ -53,7 +58,8 @@ class CharacterSelector {
   /**
    * Discovers the best matching presenter persona for a given topic or script.
    * Never hardcodes a single character.
-   * Returns 'CREATE' if no character in library matches the domain.
+   * If no exact match exists, safely falls back to an existing presenter.
+   * Returns 'CREATE' only if options.fallbackToDefault is explicitly set to false.
    */
   selectCharacter(topicOrScript = '', options = {}) {
     const text = typeof topicOrScript === 'string'
@@ -66,7 +72,9 @@ class CharacterSelector {
     for (const [_, presenter] of Object.entries(PRESENTERS)) {
       let score = 0;
       for (const kw of presenter.keywords) {
-        if (text.includes(kw)) {
+        const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp(`\\b${escaped}\\b`, 'i');
+        if (re.test(text)) {
           score += 1;
         }
       }
@@ -77,12 +85,12 @@ class CharacterSelector {
     }
 
     if (!bestMatch || highestScore === 0) {
-      if (options.fallbackToDefault) {
-        bestMatch = PRESENTERS.david_chen;
-      } else {
+      if (options.fallbackToDefault === false) {
         this.logger.warn(`No suitable character persona found in library for topic: "${topicOrScript}". Returning CREATE.`);
         return 'CREATE';
       }
+      this.logger.info(`No exact keyword match for "${topicOrScript}". Safely falling back to default presenter: David Chen.`);
+      bestMatch = PRESENTERS.david_chen;
     }
 
     const portraitPath = path.join(this.assetsDir, bestMatch.portraitFile);

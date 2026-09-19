@@ -3245,7 +3245,8 @@ class Database {
       'UPLOAD_FAILED',
       'SCHEDULED',
       'PUBLISHED',
-      'REJECTED'
+      'REJECTED',
+      'FAILED'
     ];
   }
 

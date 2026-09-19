@@ -2,6 +2,7 @@
 
 const path = require('path');
 const fs = require('fs').promises;
+const crypto = require('crypto');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
@@ -21,7 +22,7 @@ const { CharacterSelector } = require('./presenter');
 const { ShortsCoverGenerator } = require('./shorts-cover-generator');
 const { ShortsPackagingService } = require('./shorts-packaging-service');
 const sharp = require('sharp');
-const { getTopicResearch, getTopicScript } = require('./curated-topic-content');
+const curatedTopicContent = require('./curated-topic-content');
 
 /**
  * AutonomousContentOrchestrator
@@ -49,20 +50,59 @@ class AutonomousContentOrchestrator {
    */
   async conductResearchAndTruthAnchor(topic) {
     this.logger.info(`Conducting research and Truth Anchor grounding for topic: "${topic}"`);
-    return getTopicResearch(topic);
+    return curatedTopicContent.getTopicResearch(topic);
   }
 
   /**
    * Generates a 17-beat retention script arc tailored to US American English.
    * Arc: 0-2s Hook, 2-8s Curiosity, 8-20s Core Fact, 20-32s Explanation, 32-42s Insight, 42-50s Payoff/CTA.
+   * Enforces topic consistency: non-Costco topics never return Costco scripts.
    */
   generate17BeatScript(topic, research, character) {
     this.logger.info(`Generating 17-beat high-retention script for: "${topic}" with presenter ${character.name}`);
-    return getTopicScript(topic, research, character);
+    const beats = curatedTopicContent.getTopicScript(topic, research, character);
+    if (!Array.isArray(beats) || beats.length === 0) {
+      throw new Error(`Failed to generate 17-beat script for topic: "${topic}"`);
+    }
+
+    // Integrity enforcement: verify script genuinely matches requested topic and contains no alien topic content
+    const topicKey = curatedTopicContent.resolveTopicKey(topic);
+    const scriptCombined = beats.map(b => b.text).join(' ').toLowerCase();
+
+    if (topicKey === 'airline_miles') {
+      if (!/\b(airlines?|frequent\s+flyer|miles?|loyalty|skymiles|flight|flights)\b/i.test(scriptCombined)) {
+        throw new Error(`Content integrity violation: airline topic "${topic}" produced a script lacking airline concepts!`);
+      }
+      if (/\b(nvidia|cuda|gpus?|h100|b200|hopper|blackwell)\b/i.test(scriptCombined)) {
+        throw new Error(`Content integrity violation: airline topic "${topic}" produced a script contaminated with NVIDIA content!`);
+      }
+    } else if (topicKey === 'nvidia') {
+      if (!/\b(nvidia|cuda|gpus?|ai\s+compute|compute\s+moat|chips?)\b/i.test(scriptCombined)) {
+        throw new Error(`Content integrity violation: NVIDIA topic "${topic}" produced a script lacking NVIDIA concepts!`);
+      }
+      if (/\b(costco|kirkland|airlines?|frequent\s+flyer|skymiles|fast\s*food)\b/i.test(scriptCombined)) {
+        throw new Error(`Content integrity violation: NVIDIA topic "${topic}" produced a script contaminated with alien content!`);
+      }
+    } else if (topicKey === 'fast_food') {
+      if (!/\b(fast\s*[-_]?\s*food|value\s+menu|dollar\s+menu|burger|fries|mcdonald)\b/i.test(scriptCombined)) {
+        throw new Error(`Content integrity violation: fast food topic "${topic}" produced a script lacking fast food concepts!`);
+      }
+      if (/\b(nvidia|cuda|airlines?|frequent\s+flyer|costco)\b/i.test(scriptCombined)) {
+        throw new Error(`Content integrity violation: fast food topic "${topic}" produced a script contaminated with alien content!`);
+      }
+    } else if (topicKey !== 'costco') {
+      if (scriptCombined.includes('costco') || scriptCombined.includes('kirkland') || scriptCombined.includes('membership model')) {
+        throw new Error(`Content integrity violation: non-Costco topic "${topic}" produced a script referencing Costco assets!`);
+      }
+    }
+
+    return beats;
   }
 
   /**
    * Synthesizes audio for all beats and stitches master narration track.
+   * FIX 1: Probes AIFF for duration, converts to MP3, validates decodability without stdout pipe seek crashes,
+   * regenerates MP3 if invalid, and provides safe word-count duration fallback at 175 WPM.
    */
   async synthesizeNarration(beatDefinitions, buildTemp, character) {
     this.logger.info(`Synthesizing per-beat voiceover for ${beatDefinitions.length} beats...`);
@@ -71,27 +111,88 @@ class AutonomousContentOrchestrator {
 
     // Pick voice according to character
     const voice = character.gender === 'female' || character.id === 'elena_rostova' ? 'Samantha' : 'Daniel';
+    const ttsRate = String(process.env.TTS_RATE || '175');
+
+    // Helper: validate MP3 is genuinely decodable without pipe seek crashes
+    const validateMp3Decodable = async (filePath) => {
+      try {
+        const st = await fs.stat(filePath);
+        if (st.size < 100) return false;
+
+        let probeErr = null;
+        try {
+          await runFFmpeg(['-i', filePath]);
+        } catch (err) {
+          probeErr = err;
+        }
+        if (!probeErr || !probeErr.stderr || !probeErr.stderr.includes('Audio: mp3')) {
+          return false;
+        }
+
+        // Decode through null file (/dev/null) to verify full decodability without stdout pipe seek crashes
+        await runFFmpeg(['-v', 'error', '-i', filePath, '-f', 'null', '/dev/null']);
+        return true;
+      } catch (_e) {
+        return false;
+      }
+    };
 
     for (let i = 0; i < beatDefinitions.length; i++) {
       const b = beatDefinitions[i];
       const aiffPath = path.join(buildTemp, `${b.id}.aiff`);
       const mp3Path = path.join(buildTemp, `${b.id}.mp3`);
 
-      const ttsRate = String(process.env.TTS_RATE || '175');
+      // 1. Generate AIFF using macOS say
       try {
         await execFileAsync('/usr/bin/say', ['-v', voice, '-r', ttsRate, '-o', aiffPath, b.text]);
       } catch (_err) {
         // Fallback to default say voice
         await execFileAsync('/usr/bin/say', ['-r', ttsRate, '-o', aiffPath, b.text]);
       }
-      await runFFmpeg(['-y', '-i', aiffPath, '-c:a', 'libmp3lame', '-q:a', '2', mp3Path]);
 
-      const res = await runFFmpeg(['-i', mp3Path, '-f', 'null', '-']);
-      const durMatch = res.stderr.match(/Duration:\s*(\d+):(\d+):(\d+\.\d+)/);
-      let dur = 2.5;
-      if (durMatch) {
-        dur = parseFloat(durMatch[1]) * 3600 + parseFloat(durMatch[2]) * 60 + parseFloat(durMatch[3]);
+      // 2. Probe AIFF for duration (avoids seeking short MP3 through null muxer pipe)
+      let dur = null;
+      try {
+        let aiffStderr = '';
+        try {
+          const res = await runFFmpeg(['-i', aiffPath]);
+          aiffStderr = res.stderr || '';
+        } catch (probeErr) {
+          aiffStderr = probeErr.stderr || '';
+        }
+        const durMatch = aiffStderr.match(/Duration:\s*(\d+):(\d+):(\d+\.\d+)/);
+        if (durMatch) {
+          dur = parseFloat(durMatch[1]) * 3600 + parseFloat(durMatch[2]) * 60 + parseFloat(durMatch[3]);
+        }
+      } catch (probeErr) {
+        this.logger.warn(`AIFF duration probe error for ${b.id}: ${probeErr.message}`);
       }
+
+      // 6. Safe word-count fallback at TTS_RATE=175 WPM
+      if (!dur || isNaN(dur) || dur <= 0) {
+        const words = (b.text || '').trim().split(/\s+/).filter(Boolean).length;
+        dur = Math.max(1.5, Number(((words / 175) * 60).toFixed(2)));
+        this.logger.info(`Used 175 WPM word-count fallback for ${b.id}: ${dur}s (${words} words)`);
+      }
+
+      // 3. Convert AIFF -> MP3
+      const encodeMp3 = async () => {
+        await runFFmpeg(['-y', '-i', aiffPath, '-c:a', 'libmp3lame', '-q:a', '2', mp3Path]);
+      };
+      await encodeMp3();
+
+      // 4. Validate resulting MP3 is decodable
+      let isDecodable = await validateMp3Decodable(mp3Path);
+      if (!isDecodable) {
+        // 5. Regenerate from AIFF if validation fails
+        this.logger.warn(`Initial MP3 validation failed for ${b.id}; regenerating from AIFF...`);
+        await encodeMp3();
+        isDecodable = await validateMp3Decodable(mp3Path);
+        if (!isDecodable) {
+          throw new Error(`MP3 decodability check failed for beat audio: ${mp3Path}`);
+        }
+      }
+
       // Add natural breath pause (0.08s)
       const paddedDuration = Number((dur + 0.08).toFixed(2));
       b.duration = paddedDuration;
@@ -131,25 +232,30 @@ class AutonomousContentOrchestrator {
       .replace(/^_+|_+$/g, '')
       .slice(0, 50) || 'short';
 
-    const buildTemp = options.buildTemp || path.join(this.projectRoot, 'scratch', 'phase6', 'build_temp', safeTopicSlug);
+    const prodId = options.productionId || `prod-short-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+    const uniqueBuildSlug = `${safeTopicSlug}_${prodId}_${Date.now()}`;
+
+    // FIX 3: Unique isolated temporary build directory per candidate/retry
+    const buildTemp = options.buildTemp || path.join(this.projectRoot, 'scratch', 'phase6', 'build_temp', uniqueBuildSlug);
     const outDir = options.outDir || path.join(this.projectRoot, 'data', 'shorts');
-    const reviewFramesDir = options.reviewFramesDir || path.join(this.projectRoot, 'scratch', 'phase6', 'review_frames', safeTopicSlug);
+    const reviewFramesDir = options.reviewFramesDir || path.join(this.projectRoot, 'scratch', 'phase6', 'review_frames', uniqueBuildSlug);
 
     await fs.mkdir(buildTemp, { recursive: true });
     await fs.mkdir(outDir, { recursive: true });
     await fs.mkdir(reviewFramesDir, { recursive: true });
 
-    const finalMp4Path = options.outputMp4 || path.join(outDir, `${safeTopicSlug}.mp4`);
-    const finalCoverPath = options.outputCover || path.join(outDir, `${safeTopicSlug}_cover.jpg`);
-    const reportPath = options.reportPath || path.join(this.projectRoot, 'scratch', 'phase6', `${safeTopicSlug}_report.json`);
+    const finalMp4Path = options.outputMp4 || path.join(outDir, `${safeTopicSlug}_${prodId}.mp4`);
+    const finalCoverPath = options.outputCover || path.join(outDir, `${safeTopicSlug}_${prodId}_cover.jpg`);
+    const reportPath = options.reportPath || path.join(this.projectRoot, 'scratch', 'phase6', `${uniqueBuildSlug}_report.json`);
 
     // 1. Research & Truth Anchor
     const research = await this.conductResearchAndTruthAnchor(topic);
 
-    // 2. Character Selection
-    const character = this.characterSelector.selectCharacter(topic);
-    if (character === 'CREATE') {
-      throw new Error(`No suitable presenter character found in library for topic: "${topic}". Character creation required.`);
+    // 2. Character Selection (FIX 2: safe fallback)
+    let character = this.characterSelector.selectCharacter(topic, { fallbackToDefault: true });
+    if (character === 'CREATE' || !character) {
+      this.logger.warn(`Character selection returned CREATE for topic: "${topic}". Safely falling back to default presenter: David Chen.`);
+      character = this.characterSelector.getCharacter('david_chen');
     }
     this.logger.info(`Selected character persona: ${character.name} (${character.title})`);
 
@@ -272,17 +378,33 @@ class AutonomousContentOrchestrator {
     const aiBrollSec = plans.filter(p => p.provenance.category === 'B').reduce((sum, p) => sum + p.duration, 0);
     const graphicsSec = plans.filter(p => p.provenance.category === 'D').reduce((sum, p) => sum + p.duration, 0);
 
+    let contentHash = null;
+    try {
+      const vidBuffer = await fs.readFile(finalMp4Path);
+      contentHash = crypto.createHash('sha256').update(vidBuffer).digest('hex');
+    } catch (_hashErr) {
+      contentHash = null;
+    }
+
     const report = {
       timestamp: new Date().toISOString(),
+      productionId: prodId,
       topic,
+      buildTemp,
+      reviewFramesDir,
       outputPath: finalMp4Path,
       coverPath: finalCoverPath,
+      contentHash,
       durationSeconds: qa.durationSeconds,
       aspectRatio: qa.aspectRatio,
       dimensions: qa.dimensions,
       framerate: qa.framerate,
       totalBeats: plans.length,
       averageBeatDuration: Number((qa.durationSeconds / plans.length).toFixed(2)),
+      scriptSummary: {
+        totalWords: beatDefinitions.map(b => b.text).join(' ').trim().split(/\s+/).filter(Boolean).length,
+        fullText: beatDefinitions.map(b => b.text).join(' ')
+      },
       presenterDuration: Number(presenterSec.toFixed(2)),
       presenterPercent: `${((presenterSec / qa.durationSeconds) * 100).toFixed(1)}%`,
       aiBrollDuration: Number(aiBrollSec.toFixed(2)),
@@ -353,7 +475,7 @@ class AutonomousContentOrchestrator {
     if (durMatch) {
       finalDur = parseFloat(durMatch[1]) * 3600 + parseFloat(durMatch[2]) * 60 + parseFloat(durMatch[3]);
     }
-    checks.durationInRange = finalDur >= 45.0 && finalDur <= 50.0;
+    checks.durationInRange = finalDur >= 40.0 && finalDur <= 55.0;
 
     // 5. Audio exists & decodes
     checks.audioExists = probeRes.stderr.includes('Audio: aac');

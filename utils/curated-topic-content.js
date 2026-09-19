@@ -457,17 +457,178 @@ const CURATED_RESEARCH = {
 /**
  * Resolves topic key from string.
  */
+const TOPIC_RESOLVER_RULES = [
+  {
+    key: 'airline_miles',
+    phrases: [
+      /\bfrequent\s+flyer(\s+miles?)?\b/i,
+      /\b(airline|flying|loyalty)\s+miles?\b/i,
+      /\bmileage\s+programs?\b/i,
+      /\bskymiles\b/i
+    ],
+    specific: [
+      /\bairlines?\b/i
+    ],
+    tokens: [
+      /\bmiles?\b/i,
+      /\bflights?\b/i
+    ]
+  },
+  {
+    key: 'nvidia',
+    phrases: [
+      /\bcompute\s+moat\b/i,
+      /\bai\s+(compute|moat|chips?|hardware|datacenter|infrastructure|accelerators?)\b/i,
+      /\bartificial\s+intelligence\b/i
+    ],
+    specific: [
+      /\bnvidia\b/i,
+      /\bcuda\b/i,
+      /\b(gpus?|h100|b200|hopper|blackwell)\b/i
+    ],
+    tokens: [
+      /\bai\b/i // Standalone discrete token only; never matches substrings in airline, daily, retail, claim, etc.
+    ]
+  },
+  {
+    key: 'costco',
+    phrases: [
+      /\b(wholesale|warehouse)\s+clubs?\b/i,
+      /\bkirkland\s+signature\b/i,
+      /\bmembership\s+model\b/i
+    ],
+    specific: [
+      /\bcostco\b/i,
+      /\bkirkland\b/i
+    ],
+    tokens: [
+      /\bwarehouse\b/i,
+      /\bwholesale\b/i
+    ]
+  },
+  {
+    key: 'swipe_fees',
+    phrases: [
+      /\bswipe\s+fees?\b/i,
+      /\binterchange\s+fees?\b/i,
+      /\bcredit\s+card\s+(processing|network|toll|fees?)\b/i
+    ],
+    specific: [
+      /\bvisa\b/i,
+      /\bmastercard\b/i
+    ],
+    tokens: [
+      /\binterchange\b/i,
+      /\bswip(e|es|ing)\b/i
+    ]
+  },
+  {
+    key: 'apple',
+    phrases: [
+      /\bapp\s+store\b/i,
+      /\bapple\s+ecosystem\b/i
+    ],
+    specific: [
+      /\biphones?\b/i,
+      /\bmacbooks?\b/i,
+      /\bapple\b/i
+    ],
+    tokens: [
+      /\bios\b/i
+    ]
+  },
+  {
+    key: 'disney',
+    phrases: [
+      /\btheme\s+parks?\b/i,
+      /\b(park\s+)?tickets?\s+(pricing|prices?)\b/i,
+      /\bdisney\s+world\b/i,
+      /\blightning\s+lane\b/i
+    ],
+    specific: [
+      /\bdisney\b/i,
+      /\bdisneyland\b/i,
+      /\bgenie\+\b/i
+    ],
+    tokens: [
+      /\btickets?\b/i
+    ]
+  },
+  {
+    key: 'fast_food',
+    phrases: [
+      /\bfast\s*[-_]?\s*food\b/i,
+      /\bvalue\s+menus?\b/i,
+      /\bdollar\s+menus?\b/i,
+      /\bcombo\s+meals?\b/i
+    ],
+    specific: [
+      /\bmcdonald'?s\b/i,
+      /\bburger\s+king\b/i,
+      /\bwendy'?s\b/i
+    ],
+    tokens: [
+      /\bburgers?\b/i,
+      /\bfries\b/i
+    ]
+  },
+  {
+    key: 'streaming',
+    phrases: [
+      /\bstreaming\s+(services?|platforms?|apps?)\b/i,
+      /\bprice\s*[-_]?\s*hikes?\b/i,
+      /\bsubscription\s+fatigue\b/i
+    ],
+    specific: [
+      /\bnetflix\b/i,
+      /\bhulu\b/i
+    ],
+    tokens: [
+      /\bstreaming\b/i,
+      /\bsubscriptions?\b/i
+    ]
+  }
+];
+
+/**
+ * Resolves topic key from string deterministically using token-aware and phrase-aware matching.
+ * Never uses broad substring matching that can collide with ordinary words.
+ */
 function resolveTopicKey(topic = '') {
-  const lower = String(topic).toLowerCase();
-  if (lower.includes('costco')) return 'costco';
-  if (lower.includes('visa') || lower.includes('mastercard') || lower.includes('swipe')) return 'swipe_fees';
-  if (lower.includes('apple') || lower.includes('iphone')) return 'apple';
-  if (lower.includes('disney') || lower.includes('theme park') || lower.includes('ticket')) return 'disney';
-  if (lower.includes('nvidia') || lower.includes('compute moat') || lower.includes('ai')) return 'nvidia';
-  if (lower.includes('airline') || lower.includes('frequent flyer') || lower.includes('mile')) return 'airline_miles';
-  if (lower.includes('fast food') || lower.includes('value menu')) return 'fast_food';
-  if (lower.includes('streaming') || lower.includes('subscription')) return 'streaming';
-  return 'fallback';
+  const text = String(topic || '').trim();
+  if (!text) return 'fallback';
+
+  let bestKey = 'fallback';
+  let highestScore = 0;
+
+  for (const rule of TOPIC_RESOLVER_RULES) {
+    let score = 0;
+    // Multi-word phrase matches receive highest weight (score: 3)
+    if (rule.phrases) {
+      for (const pattern of rule.phrases) {
+        if (pattern.test(text)) score += 3;
+      }
+    }
+    // Specific brand/company/industry keywords receive medium weight (score: 2)
+    if (rule.specific) {
+      for (const pattern of rule.specific) {
+        if (pattern.test(text)) score += 2;
+      }
+    }
+    // Single domain tokens receive base weight (score: 1)
+    if (rule.tokens) {
+      for (const pattern of rule.tokens) {
+        if (pattern.test(text)) score += 1;
+      }
+    }
+
+    if (score > highestScore) {
+      highestScore = score;
+      bestKey = rule.key;
+    }
+  }
+
+  return highestScore > 0 ? bestKey : 'fallback';
 }
 
 /**
@@ -1280,11 +1441,11 @@ function buildDisneyScript(character) {
       beat: 'curiosity',
       sceneType: 'broll',
       isPureBRoll: true,
-      preferredAsset: 'broll_costco_bulk_pricing',
+      preferredAsset: 'broll_pricing_display',
       label: 'DYNAMIC PRICING',
       text: 'Surge pricing maximizes revenue on peak days.',
       isPresenter: false,
-      provenance: { category: 'B', categoryName: 'ai-generated-image-broll', description: 'Digital surge pricing display monitor', sourceAsset: 'assets/broll/broll_costco_bulk_pricing.mp4', isRealFootage: false }
+      provenance: { category: 'B', categoryName: 'ai-generated-image-broll', description: 'Digital surge pricing display monitor', sourceAsset: 'assets/broll/broll_pricing_display.mp4', isRealFootage: false }
     },
     {
       id: 'beat_05_broll_notif',
@@ -1857,11 +2018,11 @@ function buildAirlineMilesScript(character) {
       beat: 'escalation',
       sceneType: 'broll',
       isPureBRoll: true,
-      preferredAsset: 'broll_costco_bulk_pricing',
+      preferredAsset: 'broll_flight_display',
       label: 'DEVALUATION POWER',
       text: 'Airlines devalue points at will, erasing liabilities.',
       isPresenter: false,
-      provenance: { category: 'B', categoryName: 'ai-generated-image-broll', description: 'Digital award pricing redemption schedule', sourceAsset: 'assets/broll/broll_costco_bulk_pricing.mp4', isRealFootage: false }
+      provenance: { category: 'B', categoryName: 'ai-generated-image-broll', description: 'Digital award pricing redemption schedule', sourceAsset: 'assets/broll/broll_flight_display.mp4', isRealFootage: false }
     },
     {
       id: 'beat_12_ui_point_price_gauge',
@@ -1997,11 +2158,11 @@ function buildFastFoodScript(character) {
       beat: 'curiosity',
       sceneType: 'broll',
       isPureBRoll: true,
-      preferredAsset: 'broll_costco_bulk_pricing',
+      preferredAsset: 'broll_menu_board',
       label: 'INPUT COST EXPLOSION',
       text: 'Beef and labor costs skyrocketed forty percent.',
       isPresenter: false,
-      provenance: { category: 'B', categoryName: 'ai-generated-image-broll', description: 'Wholesale food supply price tags', sourceAsset: 'assets/broll/broll_costco_bulk_pricing.mp4', isRealFootage: false }
+      provenance: { category: 'B', categoryName: 'ai-generated-image-broll', description: 'Wholesale food supply price tags', sourceAsset: 'assets/broll/broll_menu_board.mp4', isRealFootage: false }
     },
     {
       id: 'beat_05_broll_banking',
@@ -2475,11 +2636,11 @@ function buildFallbackScript(topic, research, character) {
       beat: 'curiosity',
       sceneType: 'broll',
       isPureBRoll: true,
-      preferredAsset: 'broll_costco_bulk_pricing',
+      preferredAsset: 'broll_consumer_laptop',
       label: 'PRICING POWER',
       text: 'Corporations design pricing to eliminate friction.',
       isPresenter: false,
-      provenance: { category: 'B', categoryName: 'ai-generated-image-broll', description: 'Commercial pricing structure tags', sourceAsset: 'assets/broll/broll_costco_bulk_pricing.mp4', isRealFootage: false }
+      provenance: { category: 'B', categoryName: 'ai-generated-image-broll', description: 'Commercial pricing structure analysis', sourceAsset: 'assets/broll/broll_consumer_laptop.mp4', isRealFootage: false }
     },
     {
       id: 'beat_05_broll_banking',

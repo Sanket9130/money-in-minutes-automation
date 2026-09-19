@@ -22,6 +22,77 @@ const CURATED_TOPIC_POOL = [
   "How Streaming Services Sneakily Price-Hike Subscriptions"
 ];
 
+const TOPIC_CONTENT_CONCEPTS = {
+  airline_miles: {
+    requiredConcepts: [/\b(airlines?|frequent\s+flyer|miles?|loyalty|skymiles|flight|flights)\b/i],
+    alienChecks: [
+      { label: 'NVIDIA/AI compute', regex: /\b(nvidia|cuda|gpus?|h100|b200|hopper|blackwell)\b/i },
+      { label: 'Costco', regex: /\b(costco|kirkland|warehouse\s+club)\b/i },
+      { label: 'Disney', regex: /\b(disney|theme\s+parks?|disneyland|genie\+)\b/i },
+      { label: 'Fast Food', regex: /\b(fast\s*[-_]?\s*food|dollar\s+menu|value\s+menu)\b/i }
+    ]
+  },
+  nvidia: {
+    requiredConcepts: [/\b(nvidia|cuda|gpus?|ai\s+compute|compute\s+moat|chips?|hopper)\b/i],
+    alienChecks: [
+      { label: 'Airline', regex: /\b(airlines?|frequent\s+flyer|skymiles)\b/i },
+      { label: 'Costco', regex: /\b(costco|kirkland|warehouse\s+club)\b/i },
+      { label: 'Disney', regex: /\b(disney|theme\s+parks?|disneyland|genie\+)\b/i },
+      { label: 'Fast Food', regex: /\b(fast\s*[-_]?\s*food|dollar\s+menu|value\s+menu)\b/i }
+    ]
+  },
+  fast_food: {
+    requiredConcepts: [/\b(fast\s*[-_]?\s*food|value\s+menu|dollar\s+menu|burger|fries|mcdonald)\b/i],
+    alienChecks: [
+      { label: 'NVIDIA/AI compute', regex: /\b(nvidia|cuda|gpus?)\b/i },
+      { label: 'Airline', regex: /\b(airlines?|frequent\s+flyer|skymiles)\b/i },
+      { label: 'Costco', regex: /\b(costco|kirkland)\b/i },
+      { label: 'Disney', regex: /\b(disney|theme\s+parks?|disneyland)\b/i }
+    ]
+  },
+  costco: {
+    requiredConcepts: [/\b(costco|kirkland|wholesale|warehouse\s+club|membership\s+fees?)\b/i],
+    alienChecks: [
+      { label: 'NVIDIA/AI compute', regex: /\b(nvidia|cuda|gpus?|h100|b200)\b/i },
+      { label: 'Airline', regex: /\b(airlines?|frequent\s+flyer|skymiles)\b/i },
+      { label: 'Disney', regex: /\b(disney|theme\s+parks?|disneyland|genie\+)\b/i },
+      { label: 'Fast Food', regex: /\b(fast\s*[-_]?\s*food|dollar\s+menu)\b/i }
+    ]
+  },
+  swipe_fees: {
+    requiredConcepts: [/\b(visa|mastercard|swipe\s+fees?|interchange|card\s+processing)\b/i],
+    alienChecks: [
+      { label: 'NVIDIA/AI compute', regex: /\b(nvidia|cuda|gpus?)\b/i },
+      { label: 'Costco', regex: /\b(costco|kirkland)\b/i },
+      { label: 'Airline', regex: /\b(airlines?|frequent\s+flyer|skymiles)\b/i }
+    ]
+  },
+  apple: {
+    requiredConcepts: [/\b(apple|iphone|app\s+store|macbook|ios)\b/i],
+    alienChecks: [
+      { label: 'NVIDIA/AI compute', regex: /\b(nvidia|cuda|h100|b200)\b/i },
+      { label: 'Costco', regex: /\b(costco|kirkland)\b/i },
+      { label: 'Airline', regex: /\b(airlines?|frequent\s+flyer)\b/i }
+    ]
+  },
+  disney: {
+    requiredConcepts: [/\b(disney|theme\s+parks?|tickets?|disneyland|disney\s+world)\b/i],
+    alienChecks: [
+      { label: 'NVIDIA/AI compute', regex: /\b(nvidia|cuda|gpus?)\b/i },
+      { label: 'Costco', regex: /\b(costco|kirkland)\b/i },
+      { label: 'Airline', regex: /\b(airlines?|frequent\s+flyer)\b/i }
+    ]
+  },
+  streaming: {
+    requiredConcepts: [/\b(streaming|subscription|subscriptions|netflix|price\s*hikes?|hulu)\b/i],
+    alienChecks: [
+      { label: 'NVIDIA/AI compute', regex: /\b(nvidia|cuda|gpus?)\b/i },
+      { label: 'Costco', regex: /\b(costco|kirkland)\b/i },
+      { label: 'Airline', regex: /\b(airlines?|frequent\s+flyer)\b/i }
+    ]
+  }
+};
+
 class DailyShortsPublisher {
   constructor(options = {}) {
     this.logger = options.logger || new Logger('DailyShortsPublisher');
@@ -49,6 +120,33 @@ class DailyShortsPublisher {
     }
     await fsPromises.mkdir(this.shortsDir, { recursive: true });
     await fsPromises.mkdir(this.scratchDir, { recursive: true });
+
+    // FIX 6: Recover zombie PRODUCING records on startup
+    await this.recoverStaleProducingRecords();
+  }
+
+  /**
+   * FIX 6: Safe recovery handling for zombie PRODUCING records.
+   * Any record left in PRODUCING, RESEARCHING, QA_PENDING or UPLOADING for > 15 minutes is transitioned to FAILED.
+   */
+  async recoverStaleProducingRecords() {
+    try {
+      const staleRows = await this.db.getAllRows(
+        `SELECT production_id, topic, status, created_at FROM daily_shorts_publications
+         WHERE status IN ('PRODUCING', 'RESEARCHING', 'QA_PENDING', 'UPLOADING')
+           AND datetime(created_at) <= datetime('now', '-15 minutes')`
+      );
+      for (const stale of staleRows) {
+        this.logger.warn(`Recovering zombie publication [${stale.production_id}] stuck in ${stale.status}. Transitioning to FAILED.`);
+        await this.db.updateDailyShortPublication(stale.production_id, {
+          status: 'FAILED',
+          qa_status: 'FAILED',
+          last_error: `Auto-recovered from stale ${stale.status} state after timeout`
+        });
+      }
+    } catch (err) {
+      this.logger.warn(`Stale producing recovery check advisory error: ${err.message}`);
+    }
   }
 
   /**
@@ -96,7 +194,7 @@ class DailyShortsPublisher {
 
     const recentRecords = await this.db.listDailyShortPublications({ limit: 100 });
     const historicalTopics = recentRecords
-      .filter(r => ['READY_TO_PUBLISH', 'UPLOADING', 'SCHEDULED', 'PUBLISHED'].includes(r.status))
+      .filter(r => ['READY_TO_PUBLISH', 'UPLOADING', 'SCHEDULED', 'PUBLISHED', 'QA_FAILED', 'REJECTED', 'FAILED'].includes(r.status))
       .map(r => r.topic);
 
     const allExcluded = [...new Set([...excludedTopics, ...historicalTopics])];
@@ -282,8 +380,171 @@ class DailyShortsPublisher {
   }
 
   /**
+   * FIX 4: Production Integrity Gate
+   * Verifies candidate integrity across 12 strict criteria before candidate is marked READY_TO_PUBLISH or published.
+   * Rejects the candidate if any check fails.
+   */
+  async validateContentIntegrity(candidateData = {}) {
+    const {
+      topic,
+      productionId,
+      videoPath,
+      report,
+      qaResults = {}
+    } = candidateData;
+
+    const failures = [];
+    const { resolveTopicKey } = require('./curated-topic-content');
+    const topicKey = candidateData.resolvedTopicKey || resolveTopicKey(topic);
+    if (candidateData.resolvedTopicKey && candidateData.resolvedTopicKey !== resolveTopicKey(topic)) {
+      failures.push(`Topic resolution mismatch: provided key [${candidateData.resolvedTopicKey}] does not match resolved key [${resolveTopicKey(topic)}] for "${topic}"`);
+    }
+    const topicRule = TOPIC_CONTENT_CONCEPTS[topicKey];
+
+    // 1. Research claims verification: must contain required concepts and NO alien claims
+    const claims = report?.truthAnchorAudit?.claims || [];
+    if (claims.length > 0 && topicKey !== 'fallback' && topicRule) {
+      const claimsText = claims.map(c => `${c.statement || ''} ${c.label || ''} ${c.source || ''} ${c.id || ''}`).join(' ').toLowerCase();
+      const hasRequiredClaim = topicRule.requiredConcepts.some(rx => rx.test(claimsText));
+      if (!hasRequiredClaim) {
+        failures.push(`Topic identity mismatch: ${topicKey} candidate lacks ${topicKey} research claims`);
+      }
+      for (const alien of topicRule.alienChecks) {
+        if (alien.regex.test(claimsText)) {
+          failures.push(`Alien Truth Anchor research detected: non-${alien.label} candidate contains ${alien.label} research claims`);
+        }
+      }
+    }
+
+    // 2. Script content verification: must contain required concepts and NO alien content
+    const scriptText = (report?.scriptSummary?.fullText || '').toLowerCase();
+    if (scriptText) {
+      if (topicKey !== 'fallback' && topicRule) {
+        const hasRequiredScript = topicRule.requiredConcepts.some(rx => rx.test(scriptText));
+        if (!hasRequiredScript) {
+          failures.push(`Script topic mismatch: "${topic}" resolved to [${topicKey}] but script lacks required domain concepts`);
+        }
+        for (const alien of topicRule.alienChecks) {
+          if (alien.regex.test(scriptText)) {
+            failures.push(`Script topic mismatch: [${topicKey}] candidate script contains alien ${alien.label} content`);
+          }
+        }
+      }
+      if (report?.totalBeats && scriptText.length < 50) {
+        failures.push('Script missing or insufficiently detailed');
+      }
+    }
+
+    // 3. Beat descriptions / visual plan verification
+    const provenanceSummary = report?.provenanceSummary;
+    if (provenanceSummary && (provenanceSummary.categoryD_ProceduralGraphics || 0) + (provenanceSummary.categoryB_AIGeneratedImageBRoll || 0) === 0) {
+      failures.push('Visual plan lacks verified procedural graphics or B-roll for topic');
+    }
+
+    // 4. Visual assets & build directory verification
+    if (report?.buildTemp) {
+      const bt = report.buildTemp.toLowerCase();
+      if (topicKey !== 'costco' && bt.includes('costco')) {
+        failures.push('Visual assets mismatch: non-Costco candidate shares Costco build directory');
+      }
+      if (topicKey !== 'nvidia' && bt.includes('nvidia')) {
+        failures.push('Visual assets mismatch: non-NVIDIA candidate shares NVIDIA build directory');
+      }
+      if (topicKey !== 'airline_miles' && bt.includes('airline')) {
+        failures.push('Visual assets mismatch: non-Airline candidate shares Airline build directory');
+      }
+    }
+
+    // 5. Packaging title & tags verification
+    const packagingTitle = (report?.packaging?.title || '').toLowerCase();
+    const packagingTags = (Array.isArray(report?.packaging?.tags) ? report.packaging.tags.join(' ') : '').toLowerCase();
+    if (topicKey !== 'fallback' && topicRule) {
+      for (const alien of topicRule.alienChecks) {
+        if (alien.regex.test(packagingTitle)) {
+          failures.push(`Packaging title mismatch: [${topicKey}] candidate title contains alien ${alien.label} terminology`);
+        }
+        if (alien.regex.test(packagingTags)) {
+          failures.push(`Packaging tags mismatch: [${topicKey}] candidate tags contain alien ${alien.label} tags`);
+        }
+      }
+    }
+
+    // 6. Presenter context is appropriate
+    const characterId = report?.character?.id;
+    if (characterId && !['david_chen', 'elena_rostova', 'marcus_vance'].includes(characterId)) {
+      failures.push(`Invalid or unapproved presenter character context: "${characterId || 'none'}"`);
+    }
+
+    // 7. Manifest references current topic
+    if (report?.topic && report.topic !== topic) {
+      failures.push(`Manifest topic mismatch: expected "${topic}" but manifest reports "${report?.topic}"`);
+    }
+
+    // 8. Manifest references current production ID
+    if (report?.productionId && report.productionId !== productionId) {
+      failures.push(`Manifest productionId mismatch: expected "${productionId}" but manifest reports "${report?.productionId}"`);
+    }
+
+    // 9. Final output path belongs to current production
+    if (!videoPath || !fs.existsSync(videoPath)) {
+      failures.push(`Output MP4 missing at expected path: ${videoPath}`);
+    } else {
+      const st = await fsPromises.stat(videoPath);
+      if (st.size === 0) {
+        failures.push('Output MP4 is empty');
+      }
+    }
+
+    // 10. Final MP4 SHA-256 is not equal to any previously published MP4
+    const contentHash = await this.computeContentHash(videoPath);
+    if (!contentHash) {
+      failures.push('Unable to compute SHA-256 content hash for final MP4');
+    } else {
+      const duplicateRow = await this.db.getRow(
+        `SELECT production_id, topic, status FROM daily_shorts_publications
+         WHERE content_hash = ? AND production_id != ? AND status IN ('READY_TO_PUBLISH', 'UPLOADING', 'SCHEDULED', 'PUBLISHED')
+         LIMIT 1`,
+        [contentHash, productionId]
+      );
+      if (duplicateRow) {
+        failures.push(`Byte-for-byte duplicate blocked: SHA-256 matches production [${duplicateRow.production_id}] ("${duplicateRow.topic}")`);
+      }
+    }
+
+    // 11. Final MP4 representative frame verification (non-empty, non-black frames)
+    if (qaResults && qaResults.checks) {
+      if (qaResults.checks.noBlackFrames === false) {
+        failures.push('Visual frame verification failed: black or invalid frames detected');
+      }
+      if (qaResults.checks.representativeFramesExtracted === false) {
+        failures.push('Representative milestone frames failed to extract');
+      }
+    }
+
+    // 12. No stale output from another production is being reused
+    if (videoPath) {
+      const baseLower = path.basename(videoPath).toLowerCase();
+      if (topicKey !== 'costco' && baseLower.includes('costco')) {
+        failures.push(`Stale file reuse detected: output file name ${path.basename(videoPath)} does not match topic`);
+      }
+      if (topicKey !== 'nvidia' && baseLower.includes('nvidia')) {
+        failures.push(`Stale file reuse detected: output file name ${path.basename(videoPath)} does not match topic`);
+      }
+      if (topicKey !== 'airline_miles' && (baseLower.includes('airline') || baseLower.includes('miles'))) {
+        failures.push(`Stale file reuse detected: output file name ${path.basename(videoPath)} does not match topic`);
+      }
+    }
+
+    return {
+      valid: failures.length === 0,
+      failures,
+      contentHash
+    };
+  }
+
+  /**
    * Generates a candidate Short and runs full 17-point QA.
-   * Updates database state explicitly across IDEA -> RESEARCHING -> SCRIPTED -> PRODUCING -> QA_PENDING -> READY_TO_PUBLISH or QA_FAILED.
+   * Updates database state explicitly across IDEA -> RESEARCHING -> SCRIPTED -> PRODUCING -> QA_PENDING -> READY_TO_PUBLISH or FAILED.
    * @param {string} topic
    * @param {Object} [options={}]
    * @returns {Promise<{ productionId: string, success: boolean, record: Object, qa: Object }>}
@@ -354,6 +615,36 @@ class DailyShortsPublisher {
         };
       }
 
+      // FIX 4: Production Content Integrity Gate
+      const integrity = await this.validateContentIntegrity({
+        topic,
+        productionId: prodId,
+        videoPath: outputMp4,
+        report: orchestratorResult,
+        qaResults
+      });
+
+      if (!integrity.valid) {
+        const errorMsg = `Integrity gate rejected candidate: ${integrity.failures.join('; ')}`;
+        this.logger.error(`Candidate [${prodId}] failed content integrity: ${errorMsg}`);
+        record = await this.db.updateDailyShortPublication(prodId, {
+          status: 'REJECTED',
+          qa_status: 'FAILED',
+          video_path: outputMp4,
+          cover_path: outputCover,
+          content_hash: integrity.contentHash || contentHash,
+          last_error: errorMsg
+        });
+
+        return {
+          productionId: prodId,
+          success: false,
+          error: errorMsg,
+          record,
+          qa: qaResults
+        };
+      }
+
       // State 5: READY_TO_PUBLISH
       record = await this.db.updateDailyShortPublication(prodId, {
         status: 'READY_TO_PUBLISH',
@@ -362,10 +653,10 @@ class DailyShortsPublisher {
         cover_path: outputCover,
         title: orchestratorResult.packaging?.title || `${topic} #Shorts`,
         description: orchestratorResult.packaging?.description || topic,
-        content_hash: contentHash
+        content_hash: integrity.contentHash || contentHash
       });
 
-      this.logger.success(`Candidate [${prodId}] successfully produced and passed QA. Ready to publish.`);
+      this.logger.success(`Candidate [${prodId}] successfully produced and passed QA & Integrity gates. Ready to publish.`);
 
       return {
         productionId: prodId,
@@ -444,7 +735,28 @@ class DailyShortsPublisher {
       }
     }
 
-    // 5. Safety Switch Check
+    // 5. Final Upload Safety Gate: Topic Integrity, Semantic Content Match & Asset Integrity (Fix 4)
+    const integrityReport = options.report || {
+      topic: record.topic,
+      productionId,
+      scriptSummary: { fullText: record.description || record.title || '' },
+      character: { id: record.character_id || 'david_chen' },
+      truthAnchorAudit: { claims: [] }
+    };
+    const preflightIntegrity = await this.validateContentIntegrity({
+      topic: record.topic,
+      productionId,
+      videoPath: record.video_path,
+      report: integrityReport
+    });
+    if (!preflightIntegrity.valid) {
+      const error = new Error(`Publishing blocked by Content Integrity Gate: ${preflightIntegrity.failures.join('; ')}`);
+      error.code = 'CONTENT_INTEGRITY_BLOCKED';
+      await this.db.updateDailyShortPublication(productionId, { status: 'REJECTED', last_error: error.message });
+      throw error;
+    }
+
+    // 6. Safety Switch Check
     const publishEnabled = typeof options.forcePublish === 'boolean'
       ? options.forcePublish
       : (process.env.YOUTUBE_PUBLISH_ENABLED === 'true');
@@ -574,8 +886,19 @@ class DailyShortsPublisher {
    * @returns {Promise<Object>} Execution report
    */
   async runDailyPublishingCycle(options = {}) {
-    await this.initialize();
-    this.logger.info('=== Starting Daily Shorts Autonomous Publishing Cycle ===');
+    if (DailyShortsPublisher.isPublishingActive) {
+      this.logger.warn('DailyShortsPublisher cycle is already running; skipping overlapping execution.');
+      return {
+        completed: false,
+        skipped: true,
+        reason: 'Publishing cycle already active'
+      };
+    }
+
+    DailyShortsPublisher.isPublishingActive = true;
+    try {
+      await this.initialize();
+      this.logger.info('=== Starting Daily Shorts Autonomous Publishing Cycle ===');
 
     // 1. Recover any missed publishing obligations from previous days
     let backlogReport = { recovered: 0, totalMissed: 0, results: [] };
@@ -717,6 +1040,9 @@ class DailyShortsPublisher {
     }
 
     return finalReport;
+    } finally {
+      DailyShortsPublisher.isPublishingActive = false;
+    }
   }
 }
 

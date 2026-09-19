@@ -13,6 +13,7 @@ class DailyAutomation {
     this.generateContent = options.generateContent || null;
     this.engagement = options.engagement || null;
     this.experiments = options.experiments || null;
+    this.isPublishingShorts = false;
   }
 
   async initialize() {
@@ -129,6 +130,16 @@ class DailyAutomation {
   }
 
   async runDailyShortsPublishing(options = {}) {
+    if (this.isPublishingShorts) {
+      this.logger.warn('Daily shorts publishing cycle is already running; skipping overlapping trigger.');
+      return {
+        completed: false,
+        skipped: true,
+        reason: 'Publishing cycle already active'
+      };
+    }
+
+    this.isPublishingShorts = true;
     try {
       this.logger.info('Starting daily shorts autonomous publishing cycle...');
       const { DailyShortsPublisher } = require('../utils/daily-shorts-publisher');
@@ -147,6 +158,8 @@ class DailyAutomation {
       await this.logAutomationEvent('daily_shorts_publishing', 'error', { error: error.message });
       await this.sendFailureNotification('Daily Shorts Publishing', error);
       throw error;
+    } finally {
+      this.isPublishingShorts = false;
     }
   }
 
