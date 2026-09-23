@@ -19,6 +19,7 @@ const {
   AudioValidation,
   AudioEnhancementEngine
 } = require('./audio-enhancement-engine');
+const { resolveTopicKey } = require('./curated-topic-content');
 
 const SCENE_TYPES = Object.freeze({
   HOOK: 'HOOK',
@@ -90,6 +91,145 @@ const SAFE_ZONES = Object.freeze({
     subtitleMarginV: 80
   }
 });
+
+const DOMAIN_UI_CONFIG = Object.freeze({
+  airline_miles: {
+    theme: 'airline',
+    brandBadge: '✈️ AIRLINE ECONOMICS',
+    brandDot: '#38bdf8',
+    cardBg: 'rgba(3, 27, 78, 0.88)',
+    cardStroke: '#0284c7',
+    cardRadius: 16,
+    accentColor: '#38bdf8',
+    secondaryColor: '#f59e0b',
+    widthOffset: 20,
+    yOffset: 30,
+    stop1: '#041633',
+    stop2: '#082859',
+    stop3: '#020b1c'
+  },
+  fast_food: {
+    theme: 'fast_food',
+    brandBadge: '🍔 FAST FOOD PRICING',
+    brandDot: '#f97316',
+    cardBg: 'rgba(45, 10, 2, 0.90)',
+    cardStroke: '#ea580c',
+    cardRadius: 32,
+    accentColor: '#f97316',
+    secondaryColor: '#ef4444',
+    widthOffset: -40,
+    yOffset: -30,
+    stop1: '#2d1004',
+    stop2: '#451a07',
+    stop3: '#220c02'
+  },
+  nvidia: {
+    theme: 'nvidia',
+    brandBadge: '⚡ AI COMPUTE MOAT',
+    brandDot: '#10b981',
+    cardBg: 'rgba(2, 44, 22, 0.90)',
+    cardStroke: '#10b981',
+    cardRadius: 20,
+    accentColor: '#10b981',
+    secondaryColor: '#84cc16',
+    widthOffset: 0,
+    yOffset: 10,
+    stop1: '#021a0c',
+    stop2: '#042a15',
+    stop3: '#010d06'
+  },
+  costco: {
+    theme: 'costco',
+    brandBadge: '🛒 COSTCO WHOLESALE',
+    brandDot: '#ef4444',
+    cardBg: 'rgba(4, 29, 61, 0.90)',
+    cardStroke: '#ef4444',
+    cardRadius: 24,
+    accentColor: '#ef4444',
+    secondaryColor: '#38bdf8',
+    widthOffset: -20,
+    yOffset: 0,
+    stop1: '#031730',
+    stop2: '#06254a',
+    stop3: '#020d1c'
+  },
+  swipe_fees: {
+    theme: 'swipe_fees',
+    brandBadge: '💳 INTERCHANGE FEES',
+    brandDot: '#6366f1',
+    cardBg: 'rgba(15, 23, 55, 0.90)',
+    cardStroke: '#6366f1',
+    cardRadius: 22,
+    accentColor: '#6366f1',
+    secondaryColor: '#f59e0b',
+    widthOffset: 0,
+    yOffset: 20,
+    stop1: '#0a1226',
+    stop2: '#152247',
+    stop3: '#050914'
+  },
+  disney: {
+    theme: 'disney',
+    brandBadge: '🏰 THEME PARK MATH',
+    brandDot: '#c084fc',
+    cardBg: 'rgba(35, 10, 55, 0.90)',
+    cardStroke: '#c084fc',
+    cardRadius: 28,
+    accentColor: '#c084fc',
+    secondaryColor: '#fbbf24',
+    widthOffset: 20,
+    yOffset: -10,
+    stop1: '#18042b',
+    stop2: '#2d0a4e',
+    stop3: '#0f021c'
+  },
+  streaming: {
+    theme: 'streaming',
+    brandBadge: '📺 STREAMING AUDIT',
+    brandDot: '#f43f5e',
+    cardBg: 'rgba(35, 5, 20, 0.90)',
+    cardStroke: '#f43f5e',
+    cardRadius: 24,
+    accentColor: '#f43f5e',
+    secondaryColor: '#ec4899',
+    widthOffset: -20,
+    yOffset: 10,
+    stop1: '#18020a',
+    stop2: '#2b0517',
+    stop3: '#0c0105'
+  },
+  apple: {
+    theme: 'apple',
+    brandBadge: '📱 APPLE HARDWARE',
+    brandDot: '#e2e8f0',
+    cardBg: 'rgba(20, 25, 35, 0.90)',
+    cardStroke: '#94a3b8',
+    cardRadius: 26,
+    accentColor: '#94a3b8',
+    secondaryColor: '#38bdf8',
+    widthOffset: 0,
+    yOffset: 0,
+    stop1: '#0d121c',
+    stop2: '#182233',
+    stop3: '#06080e'
+  },
+  market_pulse: {
+    theme: 'market_pulse',
+    brandBadge: 'FINANCIAL AUDIT',
+    brandDot: '#38bdf8',
+    cardBg: 'rgba(15, 23, 42, 0.88)',
+    cardStroke: 'rgba(255, 255, 255, 0.12)',
+    cardRadius: 22,
+    accentColor: '#38bdf8',
+    secondaryColor: '#6366f1',
+    widthOffset: 0,
+    yOffset: 0,
+    stop1: '#060b17',
+    stop2: '#0b1329',
+    stop3: '#030712'
+  }
+});
+
 
 /**
  * Escapes text for XML/SVG inclusion.
@@ -1071,14 +1211,22 @@ class SceneCompositionPrimitives {
     const width = options.width || 1080;
     const height = options.height || 1920;
     const theme = options.theme || 'navy';
+    const topicKey = options.topicKey || null;
 
-    let stop1 = '#060b17';
-    let stop2 = '#0b1329';
-    let stop3 = '#030712';
-    let aura1 = '#38bdf8';
-    let aura2 = '#6366f1';
+    let stop1 = options.stop1 || '#060b17';
+    let stop2 = options.stop2 || '#0b1329';
+    let stop3 = options.stop3 || '#030712';
+    let aura1 = options.aura1 || '#38bdf8';
+    let aura2 = options.aura2 || '#6366f1';
 
-    if (theme === 'crimson' || theme === 'alert') {
+    if (topicKey && DOMAIN_UI_CONFIG[topicKey]) {
+      const cfg = DOMAIN_UI_CONFIG[topicKey];
+      stop1 = options.stop1 || cfg.stop1;
+      stop2 = options.stop2 || cfg.stop2;
+      stop3 = options.stop3 || cfg.stop3;
+      aura1 = options.aura1 || cfg.accentColor;
+      aura2 = options.aura2 || cfg.secondaryColor;
+    } else if (theme === 'crimson' || theme === 'alert') {
       stop1 = '#1a0808';
       stop2 = '#2a0e0e';
       stop3 = '#0a0303';
@@ -1114,8 +1262,8 @@ class SceneCompositionPrimitives {
       <!-- Base Canvas Background Gradient -->
       ${options.transparentBg ? `
         <!-- Transparent Scrim Overlay for moving B-roll Video Background -->
-        <rect width="${width}" height="${height}" fill="${stop3}" opacity="0.65" />
-        <rect width="${width}" height="${height}" fill="url(#fcBgGrad)" opacity="0.45" />
+        <rect width="${width}" height="${height}" fill="${stop3}" opacity="0.18" />
+        <rect width="${width}" height="${height}" fill="url(#fcBgGrad)" opacity="0.15" />
       ` : `
         <rect width="${width}" height="${height}" fill="url(#fcBgGrad)" />
       `}
@@ -1195,12 +1343,15 @@ class SceneCompositionPrimitives {
    */
   static notificationStack(notifications = [], options = {}) {
     const width = options.width || 1080;
-    const startY = options.startY || 380;
-    const cardWidth = Math.min(options.maxWidth || 920, width - 120);
+    const startY = (options.startY || 380) + (options.yOffset || 0);
+    const cardWidth = Math.min((options.maxWidth || 920) + (options.widthOffset || 0), width - 80);
     const cardHeight = options.cardHeight || 84;
     const spacing = options.spacing || 96;
     const startX = (width - cardWidth) / 2;
     const time = options.time !== undefined ? Number(options.time) : 999;
+    const cardBg = options.cardBg || 'rgba(15, 23, 42, 0.86)';
+    const cardStroke = options.cardStroke || 'rgba(255, 255, 255, 0.14)';
+    const cardRadius = options.cardRadius || 18;
 
     const defaultItems = [
       { app: 'Streaming', amount: '-$18.99/mo', note: 'Monthly Auto-Renewal', time: 'Just now', icon: 'recurring', color: '#ef4444', trigger: 0.4 },
@@ -1233,7 +1384,7 @@ class SceneCompositionPrimitives {
       itemsSvg += `
         <g transform="translate(${offsetX.toFixed(1)}, ${itemY})" opacity="${opacity.toFixed(2)}" filter="url(#panelDrop)">
           <!-- Glassmorphism Container -->
-          <rect width="${cardWidth}" height="${cardHeight}" rx="18" fill="rgba(15, 23, 42, 0.86)" stroke="rgba(255, 255, 255, 0.14)" stroke-width="1.2" />
+          <rect width="${cardWidth}" height="${cardHeight}" rx="${cardRadius}" fill="${cardBg}" stroke="${cardStroke}" stroke-width="1.2" />
           <!-- Accent Status Border Indicator -->
           <rect x="0" y="16" width="4" height="${cardHeight - 32}" rx="2" fill="${accent}" />
 
@@ -1291,11 +1442,14 @@ class SceneCompositionPrimitives {
    */
   static statementRows(rows = [], options = {}) {
     const width = options.width || 1080;
-    const startY = options.startY || 430;
-    const maxWidth = Math.min(options.maxWidth || 920, width - 120);
+    const startY = (options.startY || 430) + (options.yOffset || 0);
+    const maxWidth = Math.min((options.maxWidth || 920) + (options.widthOffset || 0), width - 80);
     const startX = (width - maxWidth) / 2;
     const rowH = 74;
     const time = options.time !== undefined ? Number(options.time) : 999;
+    const cardBg = options.cardBg || 'rgba(15, 23, 42, 0.84)';
+    const cardStroke = options.cardStroke || 'rgba(255, 255, 255, 0.14)';
+    const cardRadius = options.cardRadius || 20;
 
     const defaultRows = [
       { date: 'OCT 12', desc: 'Streaming Service', cat: 'ENTERTAINMENT', amount: '-$18.99', recurring: true },
@@ -1371,7 +1525,7 @@ class SceneCompositionPrimitives {
     return `
       <g transform="translate(${startX}, ${startY})" filter="url(#panelDrop)">
         <!-- Statement Window Outer Panel -->
-        <rect width="${maxWidth}" height="520" rx="20" fill="rgba(15, 23, 42, 0.84)" stroke="rgba(255, 255, 255, 0.14)" stroke-width="1.5" />
+        <rect width="${maxWidth}" height="520" rx="${cardRadius}" fill="${cardBg}" stroke="${cardStroke}" stroke-width="1.5" />
         
         <!-- Statement Header Bar -->
         <g transform="translate(24, 24)">
@@ -1397,8 +1551,11 @@ class SceneCompositionPrimitives {
    */
   static financialTicker(items = [], options = {}) {
     const width = options.width || 1080;
-    const y = options.y || 260;
+    const y = (options.y || 260) + (options.yOffset || 0);
     const time = options.time !== undefined ? Number(options.time) : 999;
+    const cardBg = options.cardBg || 'rgba(15, 23, 42, 0.85)';
+    const cardStroke = options.cardStroke || 'rgba(255, 255, 255, 0.1)';
+    const cardRadius = options.cardRadius || 14;
     const isRevealed = time >= 2.0;
     const defaultStats = [
       { label: 'NET LEAK', val: isRevealed ? '$219/mo' : 'CALCULATING...', color: isRevealed ? '#ef4444' : '#64748b' },
@@ -1427,7 +1584,7 @@ class SceneCompositionPrimitives {
 
     return `
       <g transform="translate(80, ${y})">
-        <rect width="${width - 160}" height="56" rx="14" fill="rgba(15, 23, 42, 0.85)" stroke="rgba(255, 255, 255, 0.1)" stroke-width="1.2" />
+        <rect width="${width - 160}" height="56" rx="${cardRadius}" fill="${cardBg}" stroke="${cardStroke}" stroke-width="1.2" />
         ${colsSvg}
       </g>
     `;
@@ -1440,7 +1597,7 @@ class SceneCompositionPrimitives {
    */
   static numberCounter(value, subtext, options = {}) {
     const width = options.width || 1080;
-    const y = options.y || 560;
+    const y = (options.y || 560) + (options.yOffset || 0);
     const accentColor = options.accentColor || '#38bdf8';
     const label = escapeXml(options.label || 'ACTUAL OUTFLOW');
     const source = escapeXml(options.source || 'Truth-Anchor Verified');
@@ -1534,10 +1691,14 @@ class SceneCompositionPrimitives {
    */
   static comparisonMeter(leftItem = {}, rightItem = {}, options = {}) {
     const width = options.width || 1080;
-    const y = options.y || 480;
-    const maxWidth = Math.min(options.maxWidth || 920, width - 120);
+    const y = (options.y || 480) + (options.yOffset || 0);
+    const maxWidth = Math.min((options.maxWidth || 920) + (options.widthOffset || 0), width - 80);
     const startX = (width - maxWidth) / 2;
     const time = options.time !== undefined ? Number(options.time) : 999;
+    const cardBg = options.cardBg || 'rgba(15, 23, 42, 0.84)';
+    const cardStroke = options.cardStroke || 'rgba(255, 255, 255, 0.12)';
+    const cardRadius = options.cardRadius || 22;
+    const accentColor = options.accentColor || '#38bdf8';
 
     const left = {
       label: escapeXml(leftItem.label || 'PERCEIVED SPEND'),
@@ -1588,11 +1749,11 @@ class SceneCompositionPrimitives {
     return `
       <g transform="translate(${startX}, ${y})" filter="url(#panelDrop)">
         <!-- Outer Frame -->
-        <rect width="${maxWidth}" height="540" rx="22" fill="rgba(15, 23, 42, 0.84)" stroke="rgba(255, 255, 255, 0.12)" stroke-width="1.5" />
+        <rect width="${maxWidth}" height="540" rx="${cardRadius}" fill="${cardBg}" stroke="${cardStroke}" stroke-width="1.5" />
 
         <!-- Header -->
         <g transform="translate(32, 40)">
-          <text x="0" y="0" font-family="Arial, sans-serif" font-size="13" font-weight="900" fill="#38bdf8" letter-spacing="1.5">
+          <text x="0" y="0" font-family="Arial, sans-serif" font-size="13" font-weight="900" fill="${accentColor}" letter-spacing="1.5">
             ${escapeXml(options.header || 'SUBSCRIPTION REALITY GAP')}
           </text>
           <text x="0" y="28" font-family="Arial, sans-serif" font-size="24" font-weight="800" fill="#ffffff">
@@ -1638,7 +1799,7 @@ class SceneCompositionPrimitives {
           <text x="20" y="30" font-family="Arial, sans-serif" font-size="14" font-weight="600" fill="#94a3b8">
             ${escapeXml(options.footnote || 'Small recurring micro-transactions hide under your mental threshold.')}
           </text>
-          <text x="20" y="52" font-family="Arial, sans-serif" font-size="13" font-weight="700" fill="#38bdf8">
+          <text x="20" y="52" font-family="Arial, sans-serif" font-size="13" font-weight="700" fill="${accentColor}">
             ✓ ${escapeXml(options.source || 'Truth-Anchor Verified: Consumer Subscription Spending Study')}
           </text>
         </g>
@@ -1652,14 +1813,18 @@ class SceneCompositionPrimitives {
    */
   static trajectoryGraph(_points = [], options = {}) {
     const width = options.width || 1080;
-    const y = options.y || 480;
-    const maxWidth = Math.min(options.maxWidth || 920, width - 120);
+    const y = (options.y || 480) + (options.yOffset || 0);
+    const maxWidth = Math.min((options.maxWidth || 920) + (options.widthOffset || 0), width - 80);
     const startX = (width - maxWidth) / 2;
     const graphH = 220;
     const heroValue = escapeXml(options.heroValue || '$37,400');
     const heroLabel = escapeXml(options.heroLabel || '10-YEAR WEALTH DRAIN');
     const source = escapeXml(options.source || 'S&P 500 Historical Benchmark (7% Real)');
     const time = options.time !== undefined ? Number(options.time) : 999;
+    const cardBg = options.cardBg || 'rgba(2, 26, 18, 0.88)';
+    const cardStroke = options.cardStroke || 'rgba(16, 185, 129, 0.3)';
+    const cardRadius = options.cardRadius || 22;
+    const accentColor = options.accentColor || '#10b981';
 
     let progress = 1.0;
     let showTerminal = true;
@@ -1685,18 +1850,18 @@ class SceneCompositionPrimitives {
     return `
       <g transform="translate(${startX}, ${y})" filter="url(#panelDrop)">
         <!-- Container Panel -->
-        <rect width="${maxWidth}" height="540" rx="22" fill="rgba(2, 26, 18, 0.88)" stroke="rgba(16, 185, 129, 0.3)" stroke-width="1.5" />
+        <rect width="${maxWidth}" height="540" rx="${cardRadius}" fill="${cardBg}" stroke="${cardStroke}" stroke-width="1.5" />
         
         <!-- Ambient Wealth Glow -->
-        <circle cx="${maxWidth * 0.8}" cy="220" r="180" fill="#10b981" opacity="${showTerminal ? '0.20' : '0.08'}" filter="url(#ambientBlur)" />
+        <circle cx="${maxWidth * 0.8}" cy="220" r="180" fill="${accentColor}" opacity="${showTerminal ? '0.20' : '0.08'}" filter="url(#ambientBlur)" />
 
         <!-- Header -->
         <g transform="translate(32, 40)">
-          <rect x="0" y="0" width="160" height="28" rx="14" fill="rgba(16, 185, 129, 0.18)" stroke="#10b981" stroke-width="1" />
-          <text x="80" y="19" font-family="Arial, sans-serif" font-size="11" font-weight="900" fill="#10b981" text-anchor="middle" letter-spacing="1">
+          <rect x="0" y="0" width="160" height="28" rx="14" fill="rgba(16, 185, 129, 0.18)" stroke="${accentColor}" stroke-width="1" />
+          <text x="80" y="19" font-family="Arial, sans-serif" font-size="11" font-weight="900" fill="${accentColor}" text-anchor="middle" letter-spacing="1">
             COMPOUND WEALTH
           </text>
-          <text x="0" y="70" font-family="Arial, sans-serif" font-size="52" font-weight="900" fill="#10b981" letter-spacing="-1">
+          <text x="0" y="70" font-family="Arial, sans-serif" font-size="52" font-weight="900" fill="${accentColor}" letter-spacing="-1">
             ${currentVal}
           </text>
           <text x="0" y="98" font-family="Arial, sans-serif" font-size="15" font-weight="700" fill="#94a3b8">
@@ -1746,10 +1911,14 @@ class SceneCompositionPrimitives {
    */
   static actionChecklist(steps = [], options = {}) {
     const width = options.width || 1080;
-    const y = options.y || 480;
-    const maxWidth = Math.min(options.maxWidth || 920, width - 120);
+    const y = (options.y || 480) + (options.yOffset || 0);
+    const maxWidth = Math.min((options.maxWidth || 920) + (options.widthOffset || 0), width - 80);
     const startX = (width - maxWidth) / 2;
     const time = options.time !== undefined ? Number(options.time) : 999;
+    const cardBg = options.cardBg || 'rgba(15, 23, 42, 0.86)';
+    const cardStroke = options.cardStroke || 'rgba(245, 158, 11, 0.3)';
+    const cardRadius = options.cardRadius || 22;
+    const accentColor = options.accentColor || '#f59e0b';
 
     const defaultSteps = [
       { step: '1', title: 'Open your banking app right now', tag: '30 SECONDS', color: '#38bdf8', trigger: 0.8 },
@@ -1782,9 +1951,9 @@ class SceneCompositionPrimitives {
 
     return `
       <g transform="translate(${startX}, ${y})" filter="url(#panelDrop)">
-        <rect width="${maxWidth}" height="500" rx="22" fill="rgba(15, 23, 42, 0.86)" stroke="rgba(245, 158, 11, 0.3)" stroke-width="1.5" />
+        <rect width="${maxWidth}" height="500" rx="${cardRadius}" fill="${cardBg}" stroke="${cardStroke}" stroke-width="1.5" />
         <g transform="translate(32, 40)">
-          <text x="0" y="0" font-family="Arial, sans-serif" font-size="13" font-weight="900" fill="#f59e0b" letter-spacing="1.5">
+          <text x="0" y="0" font-family="Arial, sans-serif" font-size="13" font-weight="900" fill="${accentColor}" letter-spacing="1.5">
             ${escapeXml(options.header || 'YOUR 30-SECOND DEFENSE PROTOCOL')}
           </text>
           <text x="0" y="30" font-family="Arial, sans-serif" font-size="26" font-weight="900" fill="#ffffff">
@@ -2216,35 +2385,28 @@ class VisualTreatmentRenderer {
     const time = options.time !== undefined ? Number(options.time) : undefined;
     const transparentBg = options.transparentBg === true;
 
+    const topicKey = plan.topicKey || options.topicKey || (plan.topic ? resolveTopicKey(plan.topic) : null) || 'market_pulse';
+    const domainCfg = DOMAIN_UI_CONFIG[topicKey] || DOMAIN_UI_CONFIG.market_pulse;
+
     // Determine theme for background gradient and auras
-    let theme = 'navy';
-    let brandDot = '#38bdf8';
-    let brandBadge = 'FINANCIAL AUDIT';
+    let theme = domainCfg.theme || 'navy';
+    let brandDot = domainCfg.brandDot || '#38bdf8';
+    let brandBadge = domainCfg.brandBadge || 'FINANCIAL AUDIT';
 
     if (beat === 'hook' || treatment === TREATMENTS.ANTI_SWIPE_HOOK || /hook|watch|stop/i.test(labelLower)) {
       theme = 'crimson';
-      brandDot = '#ef4444';
-      brandBadge = 'ALERT';
+      brandDot = domainCfg.brandDot || '#ef4444';
+      brandBadge = `${domainCfg.brandBadge || 'FINANCIAL AUDIT'} • ALERT`;
     } else if (beat === 'curiositygap' || /audit|gap|leak|curiosity/i.test(labelLower)) {
-      theme = 'navy';
-      brandDot = '#38bdf8';
-      brandBadge = 'ACCOUNT AUDIT';
+      brandBadge = `${domainCfg.brandBadge || 'FINANCIAL AUDIT'} • AUDIT`;
     } else if (beat === 'escalation' || treatment === TREATMENTS.TWO_SIDED_COMPARISON || /escalat|vs|compar/i.test(labelLower)) {
-      theme = 'amber';
-      brandDot = '#f59e0b';
-      brandBadge = 'REALITY GAP';
+      brandBadge = `${domainCfg.brandBadge || 'FINANCIAL AUDIT'} • REALITY GAP`;
     } else if (beat === 'payoff' || treatment === TREATMENTS.ANIMATED_PERCENTAGE || /payoff|compound|growth|impact/i.test(labelLower)) {
-      theme = 'emerald';
-      brandDot = '#10b981';
-      brandBadge = 'WEALTH IMPACT';
+      brandBadge = `${domainCfg.brandBadge || 'FINANCIAL AUDIT'} • IMPACT`;
     } else if (beat === 'cta' || /action|cta/i.test(labelLower)) {
-      theme = 'amber';
-      brandDot = '#f59e0b';
-      brandBadge = 'ACTION PROTOCOL';
+      brandBadge = `${domainCfg.brandBadge || 'FINANCIAL AUDIT'} • ACTION`;
     } else if (beat === 'datareveal' || treatment === TREATMENTS.ANIMATED_NUMBER || /data|metric|reveal/i.test(labelLower)) {
-      theme = 'navy';
-      brandDot = '#38bdf8';
-      brandBadge = 'VERIFIED DATA';
+      brandBadge = `${domainCfg.brandBadge || 'FINANCIAL AUDIT'} • DATA`;
     }
 
     // Build scene dynamic layers
@@ -2268,7 +2430,17 @@ class VisualTreatmentRenderer {
       dynamicLayer = `
         <!-- Beat 1: Hook & Silent Drain Notification Stack -->
         ${titleLayout.svg}
-        ${SceneCompositionPrimitives.notificationStack([], { width, startY: 460, maxWidth: width - 160, time })}
+        ${SceneCompositionPrimitives.notificationStack([], {
+          width,
+          startY: 460,
+          maxWidth: width - 160,
+          yOffset: domainCfg.yOffset || 0,
+          widthOffset: domainCfg.widthOffset || 0,
+          cardBg: domainCfg.cardBg,
+          cardStroke: domainCfg.cardStroke,
+          cardRadius: domainCfg.cardRadius,
+          time
+        })}
       `;
     } else if (beat === 'cta' || /action|checklist|protocol|defense/i.test(labelLower)) {
       // Beat 6: Action Protocol Checklist
@@ -2277,13 +2449,36 @@ class VisualTreatmentRenderer {
       const subtitle = plan.verifiedData?.subtitle;
       dynamicLayer = `
         <!-- Beat 6: Action Protocol Checklist -->
-        ${SceneCompositionPrimitives.actionChecklist(steps, { width, y: 340, maxWidth: width - 160, time, header, subtitle })}
+        ${SceneCompositionPrimitives.actionChecklist(steps, {
+          width,
+          y: 340,
+          maxWidth: width - 160,
+          yOffset: domainCfg.yOffset || 0,
+          widthOffset: domainCfg.widthOffset || 0,
+          cardBg: domainCfg.cardBg,
+          cardStroke: domainCfg.cardStroke,
+          cardRadius: domainCfg.cardRadius,
+          accentColor: domainCfg.accentColor,
+          time,
+          header,
+          subtitle
+        })}
       `;
     } else if (beat === 'curiositygap' || /audit|curiosity|scanner/i.test(labelLower)) {
       // Beat 2: Bank Statement Scanner
       dynamicLayer = `
         <!-- Beat 2: Statement Scanner UI -->
-        ${SceneCompositionPrimitives.statementRows([], { width, startY: 340, maxWidth: width - 160, time })}
+        ${SceneCompositionPrimitives.statementRows([], {
+          width,
+          startY: 340,
+          maxWidth: width - 160,
+          yOffset: domainCfg.yOffset || 0,
+          widthOffset: domainCfg.widthOffset || 0,
+          cardBg: domainCfg.cardBg,
+          cardStroke: domainCfg.cardStroke,
+          cardRadius: domainCfg.cardRadius,
+          time
+        })}
       `;
     } else if (beat === 'escalation' || treatment === TREATMENTS.TWO_SIDED_COMPARISON || /escalat|compar/i.test(labelLower)) {
       // Beat 4: Two-Sided Comparison Meter
@@ -2301,6 +2496,12 @@ class VisualTreatmentRenderer {
             width,
             y: 340,
             maxWidth: width - 160,
+            yOffset: domainCfg.yOffset || 0,
+            widthOffset: domainCfg.widthOffset || 0,
+            cardBg: domainCfg.cardBg,
+            cardStroke: domainCfg.cardStroke,
+            cardRadius: domainCfg.cardRadius,
+            accentColor: domainCfg.accentColor,
             time,
             header: plan.verifiedData?.header,
             subtitle: plan.verifiedData?.subtitle,
@@ -2319,6 +2520,12 @@ class VisualTreatmentRenderer {
             width,
             y: 340,
             maxWidth: width - 160,
+            yOffset: domainCfg.yOffset || 0,
+            widthOffset: domainCfg.widthOffset || 0,
+            cardBg: domainCfg.cardBg,
+            cardStroke: domainCfg.cardStroke,
+            cardRadius: domainCfg.cardRadius,
+            accentColor: domainCfg.accentColor,
             time,
             header: plan.verifiedData.title || plan.verifiedData.header,
             subtitle: plan.verifiedData.subtitle
@@ -2334,6 +2541,12 @@ class VisualTreatmentRenderer {
             width,
             y: 340,
             maxWidth: width - 160,
+            yOffset: domainCfg.yOffset || 0,
+            widthOffset: domainCfg.widthOffset || 0,
+            cardBg: domainCfg.cardBg,
+            cardStroke: domainCfg.cardStroke,
+            cardRadius: domainCfg.cardRadius,
+            accentColor: domainCfg.accentColor,
             heroValue: val,
             heroLabel: '10-YEAR OPPORTUNITY COST',
             source,
@@ -2350,11 +2563,20 @@ class VisualTreatmentRenderer {
       const subtext = isSubLeak ? 'The Unnoticed Monthly Subscription Drain' : (plan.scriptText || plan.verifiedData?.statement || '');
       dynamicLayer = `
         <!-- Beat 3: Hero Financial Metric Counter -->
-        ${SceneCompositionPrimitives.financialTicker([], { width, y: 310, time })}
+        ${SceneCompositionPrimitives.financialTicker([], {
+          width,
+          y: 310,
+          yOffset: domainCfg.yOffset || 0,
+          cardBg: domainCfg.cardBg,
+          cardStroke: domainCfg.cardStroke,
+          cardRadius: domainCfg.cardRadius,
+          time
+        })}
         ${SceneCompositionPrimitives.numberCounter(val, subtext, {
           width,
           y: 580,
-          accentColor: '#38bdf8',
+          yOffset: domainCfg.yOffset || 0,
+          accentColor: domainCfg.accentColor || '#38bdf8',
           label: sanitizeViewerBadge(rawLabel, 'dataReveal'),
           source,
           time
@@ -2371,6 +2593,12 @@ class VisualTreatmentRenderer {
               width,
               y: 340,
               maxWidth: width - 160,
+              yOffset: domainCfg.yOffset || 0,
+              widthOffset: domainCfg.widthOffset || 0,
+              cardBg: domainCfg.cardBg,
+              cardStroke: domainCfg.cardStroke,
+              cardRadius: domainCfg.cardRadius,
+              accentColor: domainCfg.accentColor,
               time,
               header: plan.verifiedData.header,
               subtitle: plan.verifiedData.subtitle,
@@ -2386,6 +2614,12 @@ class VisualTreatmentRenderer {
             width,
             y: 340,
             maxWidth: width - 160,
+            yOffset: domainCfg.yOffset || 0,
+            widthOffset: domainCfg.widthOffset || 0,
+            cardBg: domainCfg.cardBg,
+            cardStroke: domainCfg.cardStroke,
+            cardRadius: domainCfg.cardRadius,
+            accentColor: domainCfg.accentColor,
             time,
             header: plan.verifiedData.title || plan.verifiedData.header,
             subtitle: plan.verifiedData.subtitle
@@ -2397,7 +2631,8 @@ class VisualTreatmentRenderer {
           ${SceneCompositionPrimitives.numberCounter(val, plan.scriptText || '', {
             width,
             y: 560,
-            accentColor: '#38bdf8',
+            yOffset: domainCfg.yOffset || 0,
+            accentColor: domainCfg.accentColor || '#38bdf8',
             label: 'FINANCIAL INSIGHT',
             source: plan.verifiedData?.source || 'Truth-Anchor Verified',
             time
@@ -2443,7 +2678,7 @@ class VisualTreatmentRenderer {
   </defs>
 
   <!-- Layer 1: Atmospheric Background -->
-  ${SceneCompositionPrimitives.fullCanvasBackground({ width, height, theme, transparentBg })}
+  ${SceneCompositionPrimitives.fullCanvasBackground({ width, height, theme, topicKey, transparentBg })}
 
   <!-- Layer 2: Brand Header (Safe Top) -->
   ${SceneCompositionPrimitives.brandHeader({ width, y: 205, label: 'MONEY IN MINUTES', badge: brandBadge, dotColor: brandDot })}

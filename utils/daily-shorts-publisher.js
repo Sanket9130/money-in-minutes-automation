@@ -10,17 +10,8 @@ const { AutonomousContentOrchestrator } = require('./autonomous-content-orchestr
 const { YouTubeAuthResolver } = require('./youtube-auth-resolver');
 const { SemanticDedupService } = require('./semantic-dedup-service');
 const { Database } = require('../database/db');
-
-const CURATED_TOPIC_POOL = [
-  "Why Costco's Membership Model Is So Powerful",
-  "How Visa And Mastercard Make Billions On Hidden Swipe Fees",
-  "Why Apple's Profit Margin On iPhones Is Unmatched",
-  "The Real Math Behind Disney Theme Park Ticket Pricing",
-  "How Nvidia Built A Trillion Dollar AI Compute Moat",
-  "The Secret Economics Of Airline Frequent Flyer Miles",
-  "Why Fast Food Value Menus Are Disappearing Forever",
-  "How Streaming Services Sneakily Price-Hike Subscriptions"
-];
+const { CURATED_TOPIC_POOL, resolveTopicKey } = require('./curated-topic-content');
+const { ContentNoveltyGate } = require('./content-novelty-gate');
 
 const TOPIC_CONTENT_CONCEPTS = {
   airline_miles: {
@@ -90,6 +81,70 @@ const TOPIC_CONTENT_CONCEPTS = {
       { label: 'Costco', regex: /\b(costco|kirkland)\b/i },
       { label: 'Airline', regex: /\b(airlines?|frequent\s+flyer)\b/i }
     ]
+  },
+  college_textbooks: {
+    requiredConcepts: [/\b(textbooks?|higher\s+ed|college|publishers?|pearson|access\s+codes?|cpi|undergrad)\b/i],
+    alienChecks: [
+      { label: 'NVIDIA/AI compute', regex: /\b(nvidia|cuda|gpus?)\b/i },
+      { label: 'Costco', regex: /\b(costco|kirkland)\b/i },
+      { label: 'Airline', regex: /\b(airlines?|frequent\s+flyer)\b/i }
+    ]
+  },
+  gym_memberships: {
+    requiredConcepts: [/\b(gyms?|fitness|memberships?|planet\s+fitness|capacity|workout|unattended|members)\b/i],
+    alienChecks: [
+      { label: 'Airline', regex: /\b(airlines?|frequent\s+flyer)\b/i },
+      { label: 'Textbook', regex: /\b(textbooks?|pearson)\b/i },
+      { label: 'NVIDIA/AI compute', regex: /\b(nvidia|cuda|gpus?)\b/i }
+    ]
+  },
+  printer_ink: {
+    requiredConcepts: [/\b(printer|ink|cartridge|cartridges|gallon|hp|toner|printhead|oem)\b/i],
+    alienChecks: [
+      { label: 'Airline', regex: /\b(airlines?|frequent\s+flyer)\b/i },
+      { label: 'Gym', regex: /\b(planet\s+fitness|gym)\b/i },
+      { label: 'Disney', regex: /\b(disney|theme\s+park)\b/i }
+    ]
+  },
+  resort_fees: {
+    requiredConcepts: [/\b(resort\s+fees?|hotel|hotels|destination\s+fees?|drip\s+pricing|room\s+rates?)\b/i],
+    alienChecks: [
+      { label: 'NVIDIA/AI compute', regex: /\b(nvidia|cuda)\b/i },
+      { label: 'Printer', regex: /\b(printer|cartridge)\b/i },
+      { label: 'Costco', regex: /\b(costco|kirkland)\b/i }
+    ]
+  },
+  luxury_watches: {
+    requiredConcepts: [/\b(rolex|watches?|timepieces?|horology|waitlists?|luxury\s+watch|swiss)\b/i],
+    alienChecks: [
+      { label: 'Airline', regex: /\b(airlines?|frequent\s+flyer)\b/i },
+      { label: 'Hotel', regex: /\b(resort\s+fee|hotel)\b/i },
+      { label: 'Costco', regex: /\b(costco|kirkland)\b/i }
+    ]
+  },
+  auto_loans: {
+    requiredConcepts: [/\b(auto\s+loans?|car\s+payments?|dealership|negative\s+equity|84\s*[-_]?\s*months?|vehicles?)\b/i],
+    alienChecks: [
+      { label: 'Rolex', regex: /\b(rolex|watches?)\b/i },
+      { label: 'Textbook', regex: /\b(textbooks?|pearson)\b/i },
+      { label: 'NVIDIA/AI compute', regex: /\b(nvidia|cuda|gpus?)\b/i }
+    ]
+  },
+  overdraft_fees: {
+    requiredConcepts: [/\b(overdraft|nsf|bank\s+fees?|checking\s+accounts?|cfpb|shortfall|penalty)\b/i],
+    alienChecks: [
+      { label: 'Rolex', regex: /\b(rolex|watches?)\b/i },
+      { label: 'Printer', regex: /\b(printer|cartridge)\b/i },
+      { label: 'Airline', regex: /\b(airlines?|frequent\s+flyer)\b/i }
+    ]
+  },
+  gift_card_breakage: {
+    requiredConcepts: [/\b(gift\s+cards?|breakage|starbucks|stored\s+value|unredeemed|float)\b/i],
+    alienChecks: [
+      { label: 'NVIDIA/AI compute', regex: /\b(nvidia|cuda)\b/i },
+      { label: 'Auto Loans', regex: /\b(auto\s+loan|car\s+payment)\b/i },
+      { label: 'Costco', regex: /\b(costco|kirkland)\b/i }
+    ]
   }
 };
 
@@ -100,6 +155,7 @@ class DailyShortsPublisher {
     this.orchestrator = options.orchestrator || new AutonomousContentOrchestrator({ logger: this.logger });
     this.authResolver = options.authResolver || new YouTubeAuthResolver({ logger: this.logger });
     this.dedupService = options.dedupService || new SemanticDedupService();
+    this.noveltyGate = options.noveltyGate || new ContentNoveltyGate({ logger: this.logger, dedupService: this.dedupService });
     this.youtubeClient = options.youtubeClient || null;
 
     this.projectRoot = options.projectRoot || path.join(__dirname, '..');
@@ -184,10 +240,12 @@ class DailyShortsPublisher {
 
   /**
    * Discovers and returns the next eligible topic candidate that is not a duplicate.
-   * Enforces multi-dimensional semantic deduplication and cross-slot category diversity.
+   * Enforces multi-dimensional semantic deduplication, cross-slot category diversity,
+   * active topic-family cooldowns, and the pre-flight Content Novelty Gate.
+   * Never falls back to a timestamped string. Returns null if pool is exhausted.
    * @param {Array<string>} [excludedTopics=[]]
    * @param {string|null} [priorTopicInBatch=null]
-   * @returns {Promise<string>}
+   * @returns {Promise<string|null>}
    */
   async discoverNextTopic(excludedTopics = [], priorTopicInBatch = null) {
     await this.initialize();
@@ -198,16 +256,42 @@ class DailyShortsPublisher {
       .map(r => r.topic);
 
     const allExcluded = [...new Set([...excludedTopics, ...historicalTopics])];
+    const allExcludedNorm = allExcluded.map(t => this.noveltyGate.normalizeTopic(t)).filter(Boolean);
+
+    // Active records enforcing topic family cooldown (scheduled or published recently)
+    const activeRecords = recentRecords.filter(r =>
+      ['READY_TO_PUBLISH', 'UPLOADING', 'SCHEDULED', 'PUBLISHED'].includes(r.status)
+    );
 
     for (const candidate of CURATED_TOPIC_POOL) {
-      if (allExcluded.includes(candidate)) continue;
+      const candidateNorm = this.noveltyGate.normalizeTopic(candidate);
+      if (allExcluded.includes(candidate) || allExcludedNorm.includes(candidateNorm)) {
+        continue;
+      }
 
-      // Enforce category diversity if another topic is produced in the same batch
+      const candFamily = this.noveltyGate.resolveTopicFamily(candidate);
+
+      // Enforce category & family diversity if another topic is produced in the same batch
       if (priorTopicInBatch) {
+        const priorFamily = this.noveltyGate.resolveTopicFamily(priorTopicInBatch);
+        if (priorFamily && candFamily && priorFamily === candFamily) {
+          continue;
+        }
         const diversityCheck = this.dedupService.enforceTopicDiversity(priorTopicInBatch, candidate);
         if (!diversityCheck.allowed) {
           continue;
         }
+      }
+
+      // Pre-flight check via ContentNoveltyGate against recent active/scheduled/published records
+      const noveltyCheck = this.noveltyGate.verifyCandidateNovelty({
+        topic: candidate,
+        topicFamily: candFamily
+      }, activeRecords);
+
+      if (!noveltyCheck.passed) {
+        this.logger.info(`Candidate "${candidate}" skipped by novelty gate: ${noveltyCheck.reason}`);
+        continue;
       }
 
       const dupCheck = this.dedupService.isDuplicate(candidate, allExcluded);
@@ -219,9 +303,9 @@ class DailyShortsPublisher {
       }
     }
 
-    // Fallback if pool is exhausted: generate unique topic with timestamp
-    const fallback = `Market Pulse: Consumer Finance & Business Tactics (${new Date().toISOString().slice(0, 10)} - ${Date.now()})`;
-    return fallback;
+    // Pool is exhausted or all candidates in cooldown: halt safely without generating fake timestamped topics
+    this.logger.warn('All controlled topic families in CURATED_TOPIC_POOL are exhausted or on active cooldown.');
+    return null;
   }
 
   /**
@@ -316,6 +400,16 @@ class DailyShortsPublisher {
       try {
         // 1. Discover genuinely fresh topic respecting diversity
         const topic = await this.discoverNextTopic(excludedTopics, priorTopic);
+        if (!topic) {
+          const errMessage = 'Backlog recovery deferred: No novel topic available in controlled topic families';
+          this.logger.warn(`[Backlog Recovery] ${errMessage} for date: ${targetDate} (Slot ${slotIndex})`);
+          await this.db.updateBacklogObligation(targetDate, {
+            attempt_count: (obligation.attempt_count || 0) + 1,
+            last_error: errMessage
+          }, slotIndex);
+          results.push({ targetDate, slotIndex, success: false, error: errMessage });
+          continue;
+        }
         excludedTopics.push(topic);
         priorTopic = topic;
 
@@ -396,6 +490,9 @@ class DailyShortsPublisher {
     const failures = [];
     const { resolveTopicKey } = require('./curated-topic-content');
     const topicKey = candidateData.resolvedTopicKey || resolveTopicKey(topic);
+    if (!topicKey || !TOPIC_CONTENT_CONCEPTS[topicKey]) {
+      failures.push(`Topic identity failure: "${topic}" does not resolve to a verified canonical topic family`);
+    }
     if (candidateData.resolvedTopicKey && candidateData.resolvedTopicKey !== resolveTopicKey(topic)) {
       failures.push(`Topic resolution mismatch: provided key [${candidateData.resolvedTopicKey}] does not match resolved key [${resolveTopicKey(topic)}] for "${topic}"`);
     }
@@ -403,7 +500,7 @@ class DailyShortsPublisher {
 
     // 1. Research claims verification: must contain required concepts and NO alien claims
     const claims = report?.truthAnchorAudit?.claims || [];
-    if (claims.length > 0 && topicKey !== 'fallback' && topicRule) {
+    if (claims.length > 0 && topicRule) {
       const claimsText = claims.map(c => `${c.statement || ''} ${c.label || ''} ${c.source || ''} ${c.id || ''}`).join(' ').toLowerCase();
       const hasRequiredClaim = topicRule.requiredConcepts.some(rx => rx.test(claimsText));
       if (!hasRequiredClaim) {
@@ -419,7 +516,7 @@ class DailyShortsPublisher {
     // 2. Script content verification: must contain required concepts and NO alien content
     const scriptText = (report?.scriptSummary?.fullText || '').toLowerCase();
     if (scriptText) {
-      if (topicKey !== 'fallback' && topicRule) {
+      if (topicRule) {
         const hasRequiredScript = topicRule.requiredConcepts.some(rx => rx.test(scriptText));
         if (!hasRequiredScript) {
           failures.push(`Script topic mismatch: "${topic}" resolved to [${topicKey}] but script lacks required domain concepts`);
@@ -458,7 +555,7 @@ class DailyShortsPublisher {
     // 5. Packaging title & tags verification
     const packagingTitle = (report?.packaging?.title || '').toLowerCase();
     const packagingTags = (Array.isArray(report?.packaging?.tags) ? report.packaging.tags.join(' ') : '').toLowerCase();
-    if (topicKey !== 'fallback' && topicRule) {
+    if (topicRule) {
       for (const alien of topicRule.alienChecks) {
         if (alien.regex.test(packagingTitle)) {
           failures.push(`Packaging title mismatch: [${topicKey}] candidate title contains alien ${alien.label} terminology`);
@@ -535,6 +632,79 @@ class DailyShortsPublisher {
       }
     }
 
+    // 13. Visual domain isolation & alien visual asset checks
+    if (qaResults && qaResults.checks) {
+      if (qaResults.checks.noAlienVisualAssets === false) {
+        failures.push(`Visual domain isolation failure: candidate [${topicKey}] contains alien visual assets`);
+      }
+      if (qaResults.checks.visualDiversityMaintained === false) {
+        failures.push(`Visual diversity failure: candidate [${topicKey}] lacks dynamic visual scene progression`);
+      }
+    }
+
+    // 14. Cover perceptual hash deduplication against recent published Shorts
+    const coverDhash = candidateData.coverDhash || report?.visualDiversityAudit?.coverDhash || qaResults?.coverDhash;
+    if (coverDhash && this.db) {
+      try {
+        const recentPubs = await this.db.getAllRows(
+          `SELECT production_id, topic, cover_dhash FROM daily_shorts_publications
+           WHERE cover_dhash IS NOT NULL AND production_id != ? AND status IN ('READY_TO_PUBLISH', 'UPLOADING', 'SCHEDULED', 'PUBLISHED')
+           ORDER BY created_at DESC LIMIT 10`,
+          [productionId]
+        );
+        for (const pub of recentPubs) {
+          if (pub.cover_dhash) {
+            const dist = Database.hammingDistance(coverDhash, pub.cover_dhash);
+            const sim = ((64 - dist) / 64) * 100;
+            if (sim >= 82) {
+              failures.push(`Cover visual duplication blocked: cover is ${sim.toFixed(1)}% perceptually similar to recent Short [${pub.production_id}] ("${pub.topic}")`);
+            }
+          }
+        }
+      } catch (_e) {
+        // continue
+      }
+    }
+
+    // 15. Check visual asset duplication in database registry
+    if (this.db && qaResults?.visualAssetRecords) {
+      try {
+        const dupCheck = await this.db.checkVisualAssetDuplication(topicKey, qaResults.visualAssetRecords);
+        if (dupCheck.duplicateFound) {
+          for (const reason of dupCheck.reasons) {
+            failures.push(`Visual asset registry violation: ${reason}`);
+          }
+        }
+      } catch (_e) {
+        // continue
+      }
+    }
+
+    // 16. Hard Content Novelty Gate: Presenter-independent narration and claim metrics deduplication
+    if (this.noveltyGate && this.db) {
+      try {
+        const recentHistorical = await this.db.listDailyShortPublications({ limit: 100 });
+        // Only count live/active publications as novelty barriers — REJECTED and FAILED candidates
+        // are dead and must never block re-attempts with the same topic.
+        const liveStatuses = new Set(['SCHEDULED', 'PUBLISHED', 'READY_TO_PUBLISH', 'UPLOADING']);
+        const histForNovelty = recentHistorical.filter(
+          r => r.production_id !== productionId && liveStatuses.has(r.status)
+        );
+        const noveltyResult = this.noveltyGate.verifyCandidateNovelty({
+          topic,
+          topicFamily: topicKey,
+          scriptText: report?.scriptSummary?.fullText || '',
+          claims: report?.truthAnchorAudit?.claims || []
+        }, histForNovelty);
+
+        if (!noveltyResult.passed) {
+          failures.push(`Content novelty gate failure [${noveltyResult.reason}]: Candidate content duplicates historical or scheduled content (${JSON.stringify(noveltyResult.details || {})})`);
+        }
+      } catch (gateErr) {
+        this.logger.warn(`Novelty gate validation error: ${gateErr.message}`);
+      }
+    }
+
     return {
       valid: failures.length === 0,
       failures,
@@ -571,6 +741,38 @@ class DailyShortsPublisher {
     });
 
     try {
+      // Early Pre-Render Novelty Gate: Verify topic identity and novelty before running expensive production
+      const topicKey = resolveTopicKey(topic);
+      if (!topicKey) {
+        const errorMsg = `Pre-render novelty gate rejected: topic "${topic}" does not resolve to a verified topic family`;
+        this.logger.error(`Candidate [${prodId}] ${errorMsg}`);
+        record = await this.db.updateDailyShortPublication(prodId, {
+          status: 'REJECTED',
+          qa_status: 'FAILED',
+          last_error: errorMsg
+        });
+        return { productionId: prodId, success: false, error: errorMsg, record };
+      }
+
+      const recentHistory = await this.db.listDailyShortPublications({ limit: 100 });
+      const liveStatuses = new Set(['SCHEDULED', 'PUBLISHED', 'READY_TO_PUBLISH', 'UPLOADING']);
+      const activeHistory = recentHistory.filter(r => r.production_id !== prodId && liveStatuses.has(r.status));
+      const preNovelty = this.noveltyGate.verifyCandidateNovelty({
+        topic,
+        topicFamily: topicKey
+      }, activeHistory);
+
+      if (!preNovelty.passed) {
+        const errorMsg = `Pre-render novelty gate rejected [${preNovelty.reason}]: ${JSON.stringify(preNovelty.details || {})}`;
+        this.logger.error(`Candidate [${prodId}] ${errorMsg}`);
+        record = await this.db.updateDailyShortPublication(prodId, {
+          status: 'REJECTED',
+          qa_status: 'FAILED',
+          last_error: errorMsg
+        });
+        return { productionId: prodId, success: false, error: errorMsg, record };
+      }
+
       // State 2: RESEARCHING
       await this.db.updateDailyShortPublication(prodId, { status: 'RESEARCHING' });
 
@@ -653,7 +855,10 @@ class DailyShortsPublisher {
         cover_path: outputCover,
         title: orchestratorResult.packaging?.title || `${topic} #Shorts`,
         description: orchestratorResult.packaging?.description || topic,
-        content_hash: integrity.contentHash || contentHash
+        content_hash: integrity.contentHash || contentHash,
+        cover_dhash: qaResults?.coverDhash || orchestratorResult?.visualDiversityAudit?.coverDhash || null,
+        frame_dhashes: qaResults?.frameDhashes || orchestratorResult?.visualDiversityAudit?.frameDhashes || null,
+        visual_asset_hashes: qaResults?.visualAssetRecords ? qaResults.visualAssetRecords.map(r => r.asset_hash) : null
       });
 
       this.logger.success(`Candidate [${prodId}] successfully produced and passed QA & Integrity gates. Ready to publish.`);
@@ -950,6 +1155,19 @@ class DailyShortsPublisher {
         const topic = (slotIndex === 1 && options.topic)
           ? options.topic
           : await this.discoverNextTopic(excludedTopics, priorTopicInBatch);
+
+        if (!topic) {
+          this.logger.warn(`No novel topic available for Slot ${slotIndex}. Controlled pool exhausted or cooldown active. Halting safely.`);
+          slotAttempts.push({
+            slotIndex,
+            attempt: candidateIdx,
+            topic: null,
+            productionId: null,
+            qaPassed: false,
+            error: 'No novel topic available in controlled topic families'
+          });
+          break;
+        }
         excludedTopics.push(topic);
 
         // 2. Produce candidate & verify QA

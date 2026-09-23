@@ -39,13 +39,17 @@ const BEAT_KEYWORDS = {
   cta: ['person confident financial planning', 'lifestyle financial freedom', 'business planning workspace']
 };
 
+const { TopicVisualGenerator } = require('./topic-visual-generator');
+const { resolveTopicKey } = require('./curated-topic-content');
+
 class FreeBRollProvider {
   constructor(options = {}) {
     this.logger = options.logger || new Logger('FreeBRollProvider');
-    this.cacheDir = options.cacheDir || path.join(process.cwd(), 'data', 'broll');
+    this.cacheDir = options.brollDir || options.cacheDir || path.join(process.cwd(), 'data', 'broll');
     this.localAssetsDir = options.localAssetsDir || path.join(process.cwd(), 'assets', 'broll');
     this.pexelsApiKey = process.env.PEXELS_API_KEY || options.pexelsApiKey || null;
     this.pixabayApiKey = process.env.PIXABAY_API_KEY || options.pixabayApiKey || null;
+    this.topicVisualGenerator = options.topicVisualGenerator || new TopicVisualGenerator({ logger: this.logger });
   }
 
   /**
@@ -59,16 +63,52 @@ class FreeBRollProvider {
    * Discovers and retrieves an optimal, conformed 1080x1920 30fps B-roll video clip for a given scene.
    * Order of priority:
    * 1. Free Stock API (Pexels / Pixabay) if credentials exist in environment
-   * 2. Local curated CC0 video footage in assets/broll or data/broll
-   * 3. Procedural cinematic moving video synthesized via FFmpeg (guaranteed zero-cost, deterministic fallback)
+   * 2. Local curated CC0 video footage in assets/broll or data/broll (strict topic permission check)
+   * 3. TopicVisualGenerator high-fidelity procedural 1080x1920 30fps synthesis (guaranteed zero-cost, topic-authentic)
+   * 4. Procedural cinematic moving video synthesized via FFmpeg
    */
   async getBRollForScene(scene = {}, options = {}) {
     await fs.mkdir(this.cacheDir, { recursive: true });
 
+    const rawTopic = scene.topic || scene.topicKey || options.topic || options.topicKey || scene.scriptText || scene.label || '';
+    const topicKey = scene.topicKey || options.topicKey || resolveTopicKey(rawTopic) || 'market_pulse';
     const beat = String(scene.beat || 'hook').toLowerCase();
     const duration = Math.max(1, Number(scene.duration || 5));
     const sceneId = scene.id || scene.sceneId || `scene_${Date.now()}`;
-    const targetPath = path.join(this.cacheDir, `broll_${sceneId}_${beat}.mp4`);
+    const productionId = scene.productionId || options.productionId || 'prod_default';
+    const preferredAsset = scene.preferredAsset || options.preferredAsset || '';
+
+    // Enforce isolated cache key: topicKey/productionId/sceneId/beat/preferredAsset/duration
+    const cacheKeyStr = `${topicKey}/${productionId}/${sceneId}/${beat}/${preferredAsset}/${duration}`;
+    const cacheHash = crypto.createHash('sha256').update(cacheKeyStr).digest('hex').slice(0, 16);
+    const targetPath = path.join(this.cacheDir, `broll_${topicKey}_${beat}_${cacheHash}.mp4`);
+
+    try {
+      const existingStat = await fs.stat(targetPath);
+      if (existingStat.size > 1024) {
+        const provenance = {
+          sourceType: SOURCE_TYPES.LOCAL,
+          provider: 'cached-broll',
+          assetId: `cached_${topicKey}_${beat}_${cacheHash}`,
+          sourceUrl: null,
+          localPath: targetPath,
+          downloadedAt: new Date().toISOString(),
+          licenseInfo: 'Cached Conformed Asset',
+          sceneId,
+          beat,
+          duration,
+          topicKey,
+          isTopicAuthentic: true
+        };
+        return {
+          brollPath: targetPath,
+          provenance,
+          ...provenance
+        };
+      }
+    } catch (_err) {
+      // not in cache, proceed
+    }
 
     let rawSource = null;
 
@@ -79,23 +119,52 @@ class FreeBRollProvider {
       rawSource = await this.fetchPixabayVideo(beat, options);
     }
 
-    // 2. Try Local Library if stock API not configured or failed
+    // 2. Try Local Library with strict topic permission check
     if (!rawSource) {
       rawSource = await this.findLocalFootage(beat, {
         ...options,
+        topicKey,
         keywords: scene.brollKeywords || options.keywords,
         label: scene.label,
         id: scene.id,
-        preferredAsset: scene.preferredAsset || options.preferredAsset
+        preferredAsset
       });
     }
 
-    // 3. Fallback to Procedural Video Generation via FFmpeg
+    // 3. Fallback to Topic-Specific Visual Synthesis (High Definition 1080x1920)
+    if (!rawSource) {
+      try {
+        const genRawPath = path.join(this.cacheDir, `raw_tvg_${topicKey}_${beat}_${cacheHash}.mp4`);
+        await this.topicVisualGenerator.generateTopicBRollVideo(
+          topicKey,
+          preferredAsset || beat,
+          duration,
+          genRawPath,
+          { ...options, sceneId, beat, productionId }
+        );
+        rawSource = {
+          sourceType: SOURCE_TYPES.PROCEDURAL,
+          provider: 'topic-visual-generator',
+          assetId: `tvg_${topicKey}_${beat}_${cacheHash.slice(0, 8)}`,
+          sourceUrl: `procedural://topic-visual-generator/${topicKey}/${beat}`,
+          localPath: genRawPath,
+          downloadedAt: new Date().toISOString(),
+          licenseInfo: 'Procedural Topic Visual Generator (CC0 equivalent)',
+          theme: beat,
+          topicKey,
+          isTopicAuthentic: true
+        };
+      } catch (tvgErr) {
+        this.logger.warn(`Topic visual generation failed for [${topicKey}/${beat}]: ${tvgErr.message}; falling back to procedural waves`);
+      }
+    }
+
+    // 4. Procedural moving light waves fallback
     if (!rawSource) {
       rawSource = await this.generateProceduralVideo(beat, duration, sceneId);
     }
 
-    // 4. Conform footage to 1080x1920, 30fps, target duration, and cinematic dark color grade
+    // 5. Conform footage to 1080x1920, 30fps, target duration, and cinematic dark color grade
     await this.conformBRollClip(rawSource.localPath, targetPath, duration, {
       darken: options.darken !== false,
       theme: rawSource.theme || beat
@@ -111,10 +180,12 @@ class FreeBRollProvider {
       licenseInfo: rawSource.licenseInfo,
       sceneId,
       beat,
-      duration
+      duration,
+      topicKey,
+      isTopicAuthentic: Boolean(rawSource.isTopicAuthentic)
     };
 
-    this.logger.info(`B-roll secured for [${beat}] beat via ${provenance.provider} (${provenance.sourceType}) -> ${targetPath}`);
+    this.logger.info(`B-roll secured for [${topicKey}/${beat}] beat via ${provenance.provider} (${provenance.sourceType}) -> ${targetPath}`);
 
     return {
       brollPath: targetPath,
@@ -240,6 +311,7 @@ class FreeBRollProvider {
    * Looks for local pre-downloaded or curated video footage in assets/broll or data/broll.
    */
   async findLocalFootage(beat, options = {}) {
+    const topicKey = options.topicKey || 'market_pulse';
     const searchDirs = [this.localAssetsDir];
     const genericWords = new Set(['broll', 'scene', 'video', 'clip', 'beat']);
     const rawKeywords = (options.keywords || []).map(k => String(k).toLowerCase());
@@ -257,34 +329,39 @@ class FreeBRollProvider {
       try {
         const files = await fs.readdir(dir);
 
-        // 1. First priority: exact preferredAsset match
+        // 1. First priority: exact preferredAsset match, strictly checked against topic domain
         if (options.preferredAsset) {
           const pref = String(options.preferredAsset).toLowerCase();
           const cleanPref = pref.replace(/^broll_/, '');
-          const prefMatch = files.find(f => {
-            const lower = f.toLowerCase();
-            return (lower.endsWith('.mp4') || lower.endsWith('.mov')) &&
-              (lower.includes(pref) || lower.includes(cleanPref));
-          });
-          if (prefMatch) {
-            const localPath = path.join(dir, prefMatch);
-            return {
-              sourceType: SOURCE_TYPES.LOCAL,
-              provider: PROVIDERS.LOCAL_LIBRARY,
-              assetId: `local_${path.basename(prefMatch, path.extname(prefMatch))}`,
-              sourceUrl: `local://library/${prefMatch}`,
-              localPath,
-              downloadedAt: new Date().toISOString(),
-              licenseInfo: 'Local Curated CC0 Asset',
-              theme: beat
-            };
+          if (this.topicVisualGenerator.isAssetPermittedForTopic(topicKey, pref)) {
+            const prefMatch = files.find(f => {
+              const lower = f.toLowerCase();
+              return (lower.endsWith('.mp4') || lower.endsWith('.mov')) &&
+                (lower.includes(pref) || lower.includes(cleanPref)) &&
+                this.topicVisualGenerator.isAssetPermittedForTopic(topicKey, lower);
+            });
+            if (prefMatch) {
+              const localPath = path.join(dir, prefMatch);
+              return {
+                sourceType: SOURCE_TYPES.LOCAL,
+                provider: PROVIDERS.LOCAL_LIBRARY,
+                assetId: `local_${path.basename(prefMatch, path.extname(prefMatch))}`,
+                sourceUrl: `local://library/${prefMatch}`,
+                localPath,
+                downloadedAt: new Date().toISOString(),
+                licenseInfo: 'Local Curated CC0 Asset',
+                theme: beat,
+                topicKey
+              };
+            }
           }
         }
 
-        // 2. Second priority: semantic keyword matching
+        // 2. Second priority: semantic keyword matching, strictly checked against topic domain
         const match = files.find(f => {
           const lower = f.toLowerCase();
           if (!lower.endsWith('.mp4') && !lower.endsWith('.mov')) return false;
+          if (!this.topicVisualGenerator.isAssetPermittedForTopic(topicKey, lower)) return false;
           return keywords.some(kw => lower.includes(kw));
         });
         if (match) {
@@ -297,7 +374,8 @@ class FreeBRollProvider {
             localPath,
             downloadedAt: new Date().toISOString(),
             licenseInfo: 'Local Curated CC0 Asset',
-            theme: beat
+            theme: beat,
+            topicKey
           };
         }
       } catch (_err) {

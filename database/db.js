@@ -671,12 +671,31 @@ class Database {
         published_at TEXT,
         upload_attempts INTEGER DEFAULT 0,
         last_error TEXT,
+        cover_dhash TEXT,
+        frame_dhashes TEXT,
+        visual_asset_hashes TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP
       )`,
       `CREATE INDEX IF NOT EXISTS idx_daily_shorts_status ON daily_shorts_publications(status)`,
       `CREATE INDEX IF NOT EXISTS idx_daily_shorts_content_hash ON daily_shorts_publications(content_hash)`,
       `CREATE INDEX IF NOT EXISTS idx_daily_shorts_scheduled_at ON daily_shorts_publications(scheduled_at)`,
+      // Production Visual Asset Registry
+      `CREATE TABLE IF NOT EXISTS visual_asset_registry (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        production_id TEXT NOT NULL,
+        topic TEXT NOT NULL,
+        topic_key TEXT NOT NULL,
+        beat_id TEXT NOT NULL,
+        asset_type TEXT NOT NULL,
+        asset_hash TEXT NOT NULL,
+        perceptual_hash TEXT NOT NULL,
+        asset_path TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_visual_asset_hash ON visual_asset_registry(asset_hash)`,
+      `CREATE INDEX IF NOT EXISTS idx_visual_asset_phash ON visual_asset_registry(perceptual_hash)`,
+      `CREATE INDEX IF NOT EXISTS idx_visual_asset_prod ON visual_asset_registry(production_id)`,
       // Phase 8: Autonomous Daily Shorts Backlog & Missed-Day Recovery (Composite key target_date + slot_index)
       `CREATE TABLE IF NOT EXISTS daily_shorts_backlog (
         target_date TEXT NOT NULL,
@@ -699,6 +718,12 @@ class Database {
     }
 
     await this.ensureBacklogMultiSlotSchema();
+
+    await this.ensureColumns('daily_shorts_publications', {
+      cover_dhash: 'TEXT',
+      frame_dhashes: 'TEXT',
+      visual_asset_hashes: 'TEXT'
+    });
 
     await this.ensureColumns('production_scenes', {
       narration_provider: 'TEXT',
@@ -724,7 +749,7 @@ class Database {
   }
 
   async ensureColumns(tableName, columns) {
-    const allowedTables = new Set(['production_scenes', 'channel_strategies', 'discoverability_audits']);
+    const allowedTables = new Set(['production_scenes', 'channel_strategies', 'discoverability_audits', 'daily_shorts_publications']);
     if (!allowedTables.has(tableName)) throw new Error(`Unsupported migration table: ${tableName}`);
     const existing = new Set((await this.getAllRows(`PRAGMA table_info(${tableName})`)).map(column => column.name));
     for (const [columnName, definition] of Object.entries(columns)) {
@@ -3264,8 +3289,10 @@ class Database {
       INSERT INTO daily_shorts_publications (
         production_id, topic, video_path, cover_path, title, description,
         content_hash, status, qa_status, youtube_status, youtube_video_id,
-        scheduled_at, published_at, upload_attempts, last_error, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        scheduled_at, published_at, upload_attempts, last_error,
+        cover_dhash, frame_dhashes, visual_asset_hashes,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(production_id) DO UPDATE SET
         topic = excluded.topic,
         video_path = COALESCE(excluded.video_path, daily_shorts_publications.video_path),
@@ -3281,6 +3308,9 @@ class Database {
         published_at = COALESCE(excluded.published_at, daily_shorts_publications.published_at),
         upload_attempts = COALESCE(excluded.upload_attempts, daily_shorts_publications.upload_attempts),
         last_error = excluded.last_error,
+        cover_dhash = COALESCE(excluded.cover_dhash, daily_shorts_publications.cover_dhash),
+        frame_dhashes = COALESCE(excluded.frame_dhashes, daily_shorts_publications.frame_dhashes),
+        visual_asset_hashes = COALESCE(excluded.visual_asset_hashes, daily_shorts_publications.visual_asset_hashes),
         updated_at = CURRENT_TIMESTAMP
     `;
 
@@ -3301,6 +3331,9 @@ class Database {
       record.published_at || null,
       record.upload_attempts || 0,
       record.last_error || null,
+      record.cover_dhash || null,
+      typeof record.frame_dhashes === 'object' ? JSON.stringify(record.frame_dhashes) : (record.frame_dhashes || null),
+      typeof record.visual_asset_hashes === 'object' ? JSON.stringify(record.visual_asset_hashes) : (record.visual_asset_hashes || null),
       record.created_at || now,
       record.updated_at || now
     ]);
@@ -3325,13 +3358,17 @@ class Database {
       'topic', 'video_path', 'cover_path', 'title', 'description',
       'content_hash', 'status', 'qa_status', 'youtube_status',
       'youtube_video_id', 'scheduled_at', 'published_at',
-      'upload_attempts', 'last_error'
+      'upload_attempts', 'last_error',
+      'cover_dhash', 'frame_dhashes', 'visual_asset_hashes'
     ];
 
     for (const key of allowedFields) {
       if (updates[key] !== undefined) {
         fields.push(`${key} = ?`);
-        params.push(updates[key]);
+        const val = (key === 'frame_dhashes' || key === 'visual_asset_hashes') && typeof updates[key] === 'object'
+          ? JSON.stringify(updates[key])
+          : updates[key];
+        params.push(val);
       }
     }
 
@@ -3614,6 +3651,117 @@ class Database {
       [targetDate, lookupSlot]
     );
     return row || this.getRow('SELECT * FROM daily_shorts_backlog WHERE target_date = ? LIMIT 1', [targetDate]);
+  }
+
+  /**
+   * Records a single visual asset into visual_asset_registry.
+   */
+  async recordVisualAsset(asset = {}) {
+    if (!asset.production_id || !asset.asset_hash) return null;
+    const query = `
+      INSERT INTO visual_asset_registry (
+        production_id, topic, topic_key, beat_id, asset_type, asset_hash, perceptual_hash, asset_path, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+    const now = new Date().toISOString();
+    await this.executeQuery(query, [
+      asset.production_id,
+      asset.topic || '',
+      asset.topic_key || '',
+      asset.beat_id || '',
+      asset.asset_type || 'broll',
+      asset.asset_hash,
+      asset.perceptual_hash || '',
+      asset.asset_path || null,
+      now
+    ]);
+    return asset;
+  }
+
+  /**
+   * Records multiple visual assets for a production.
+   */
+  async recordVisualAssets(productionId, topic, topicKey, assetRecords = []) {
+    if (!Array.isArray(assetRecords) || assetRecords.length === 0) return [];
+    for (const record of assetRecords) {
+      await this.recordVisualAsset({
+        production_id: productionId,
+        topic,
+        topic_key: topicKey,
+        ...record
+      });
+    }
+    return assetRecords;
+  }
+
+  /**
+   * Retrieves recent visual assets from the registry.
+   */
+  async getRecentVisualAssets(limit = 50, excludeProductionId = null) {
+    let query = 'SELECT * FROM visual_asset_registry';
+    const params = [];
+    if (excludeProductionId) {
+      query += ' WHERE production_id != ?';
+      params.push(excludeProductionId);
+    }
+    query += ' ORDER BY created_at DESC LIMIT ?';
+    params.push(Math.max(1, limit));
+    return this.getAllRows(query, params);
+  }
+
+  /**
+   * Computes the bitwise Hamming distance between two hex hashes of equal length.
+   */
+  static hammingDistance(hex1, hex2) {
+    if (!hex1 || !hex2 || typeof hex1 !== 'string' || typeof hex2 !== 'string') return 64;
+    const clean1 = hex1.trim().toLowerCase();
+    const clean2 = hex2.trim().toLowerCase();
+    if (clean1.length !== clean2.length) return 64;
+    let dist = 0;
+    for (let i = 0; i < clean1.length; i++) {
+      let v = parseInt(clean1[i], 16) ^ parseInt(clean2[i], 16);
+      while (v > 0) {
+        dist += v & 1;
+        v >>= 1;
+      }
+    }
+    return dist;
+  }
+
+  /**
+   * Checks for duplication against recent visual assets.
+   * Returns { duplicateFound: boolean, reasons: string[] }
+   */
+  async checkVisualAssetDuplication(topicKey, candidateAssets = [], _candidateFrameDhashes = []) {
+    const reasons = [];
+    const recent = await this.getRecentVisualAssets(100);
+
+    for (const cand of candidateAssets) {
+      if (!cand || !cand.asset_hash) continue;
+      // Check byte-for-byte asset hash reuse across other topics
+      const matching = recent.find(r => r.asset_hash === cand.asset_hash && r.topic_key !== topicKey);
+      if (matching) {
+        reasons.push(`Exact asset hash ${cand.asset_hash.slice(0, 12)} reused across topics: [${matching.topic_key}] vs [${topicKey}] (beat: ${cand.beat_id || 'unknown'})`);
+      }
+
+      // Check perceptual hash collision for covers and hero graphics (Hamming distance < 8 = >87.5% similar)
+      if (cand.perceptual_hash && (cand.asset_type === 'cover' || cand.asset_type === 'hero')) {
+        for (const r of recent) {
+          if (r.perceptual_hash && r.topic_key !== topicKey && (r.asset_type === 'cover' || r.asset_type === 'hero')) {
+            const dist = Database.hammingDistance(cand.perceptual_hash, r.perceptual_hash);
+            const simPercent = ((64 - dist) / 64) * 100;
+            if (simPercent >= 82) {
+              reasons.push(`High perceptual similarity (${simPercent.toFixed(1)}%, dist=${dist}) between ${cand.asset_type} and prior ${r.asset_type} of topic [${r.topic_key}]`);
+            }
+          }
+        }
+      }
+    }
+
+    return {
+      duplicateFound: reasons.length > 0,
+      reasons
+    };
   }
 }
 

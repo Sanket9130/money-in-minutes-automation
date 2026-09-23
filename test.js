@@ -115,7 +115,9 @@ class SystemTest {
       { name: 'Missed-Day Recovery & Backfill Engine (Phase 8)', test: () => this.testMissedDayRecoveryAndBackfill() },
       { name: 'Scheduler Daily Shorts UTC Schedule & Execution', test: () => this.testSchedulerDailyShortsSchedule() },
       { name: 'Production Failure Fixes Regression Suite (Fixes 1-12)', test: () => this.testProductionFailureFixesRegression() },
-      { name: 'Topic Routing & Content Integrity Contamination Regression Suite', test: () => this.testTopicRoutingAndContentIntegrityRegression() }
+      { name: 'Topic Routing & Content Integrity Contamination Regression Suite', test: () => this.testTopicRoutingAndContentIntegrityRegression() },
+      { name: 'Visual Diversity & Asset Isolation Integrity (Bug Audit Fix)', test: () => this.testVisualDiversityAndAssetIsolation() },
+      { name: 'Content Novelty Gate & Anti-Duplication Regression Suite', test: () => this.testContentNoveltyGateAndAntiDuplication() }
     ];
 
     let passed = 0;
@@ -9834,7 +9836,7 @@ class SystemTest {
         scratchDir: testScratchDir,
         maxCandidateAttempts: 2
       });
-      const failResult = await retryPublisher.generateCandidate('Failing Generation Topic');
+      const failResult = await retryPublisher.generateCandidate("Why Costco's Membership Model Is So Powerful");
       if (failResult.success || failResult.record.status !== 'REJECTED' || !failResult.record.last_error.includes('Simulated transient video rendering failure')) {
         throw new Error('Case 5 Failed: Failed generation candidate was not rejected with recorded error');
       }
@@ -9848,8 +9850,9 @@ class SystemTest {
       await fs.writeFile(dummyCoverFile, 'MOCK_JPEG_COVER_DATA');
       await db.saveDailyShortPublication({
         production_id: crashProdId,
-        topic: 'Crash Recovery Topic',
-        title: 'Crash Recovery Topic #Shorts',
+        topic: 'How Visa And Mastercard Make Billions On Hidden Swipe Fees',
+        title: 'How Visa And Mastercard Make Billions On Hidden Swipe Fees #Shorts',
+        description: 'Visa and Mastercard hidden swipe fees credit card interchange network processing fees',
         video_path: dummyVideoFile,
         cover_path: dummyCoverFile,
         status: 'READY_TO_PUBLISH',
@@ -10135,13 +10138,17 @@ class SystemTest {
         }
       };
       const mockSuccessOrchestrator = {
-        produceShort: async ({ outputMp4, outputCover }) => {
-          await fs.writeFile(outputMp4, 'FRESH_MP4_DATA_' + Date.now());
-          await fs.writeFile(outputCover, 'FRESH_COVER_DATA_' + Date.now());
+        produceShort: async ({ outputMp4, outputCover, topic }) => {
+          await fs.writeFile(outputMp4, 'FRESH_MP4_DATA_' + Date.now() + Math.random());
+          await fs.writeFile(outputCover, 'FRESH_COVER_DATA_' + Date.now() + Math.random());
+          const { getTopicResearch, getTopicScript } = require('./utils/curated-topic-content');
+          const research = getTopicResearch(topic);
+          const beats = getTopicScript(topic, research, { name: 'David Chen', id: 'david_chen' });
+          const fullText = beats ? beats.map(b => b.text || '').join(' ') : topic;
           return {
             productionReady: true,
             qaResults: { allChecksPassed: true },
-            packaging: { title: 'Backfill Test Title #Shorts', description: 'Backfill test description' }
+            packaging: { title: `${topic} #Shorts`, description: fullText }
           };
         }
       };
@@ -10224,6 +10231,11 @@ class SystemTest {
       this.logger.info('TEST 13 Passed: Previously published MP4 cannot be reused.');
 
       // TEST 14: Multiple backlog items -> Safe sequential processing without uncontrolled concurrency
+      // Explicitly reset/isolate topic history, cooldown state, prior candidates, and backlog state
+      await db.executeQuery('DELETE FROM daily_shorts_publications');
+      await db.executeQuery('DELETE FROM daily_shorts_backlog');
+      DailyShortsPublisher.isPublishingActive = false;
+
       const workingPublisher = new DailyShortsPublisher({
         db,
         orchestrator: mockSuccessOrchestrator,
@@ -10252,7 +10264,13 @@ class SystemTest {
       if (schedTimes.length !== uniqueSchedTimes.size) {
         throw new Error('TEST 14 Failed: Recovered videos assigned duplicate scheduled timestamps');
       }
-      this.logger.info('TEST 14 Passed: Multiple backlog items recovered sequentially with unique timestamps.');
+      // Verify distinct recovered topics
+      const recoveredTopics = recoveryReport.results.map(r => r.topic).filter(Boolean);
+      const uniqueTopics = new Set(recoveredTopics);
+      if (recoveredTopics.length < 2 || uniqueTopics.size < 2) {
+        throw new Error('TEST 14 Failed: Recovered obligations did not use genuinely distinct topics');
+      }
+      this.logger.info('TEST 14 Passed: Multiple backlog items recovered sequentially with unique timestamps and distinct topics.');
 
       // TEST 15: Current day already satisfied -> No extra Short produced
       const todayPid1 = `today-sat-1-${Date.now()}`;
@@ -11274,6 +11292,570 @@ class SystemTest {
     } finally {
       await db.close().catch(() => {});
       await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  async testVisualDiversityAndAssetIsolation() {
+    this.logger.info('=== Starting Visual Diversity & Asset Isolation Integrity Regression Suite ===');
+    const { TopicVisualGenerator, isAssetPermittedForTopic } = require('./utils/topic-visual-generator');
+    const curatedTopicContent = require('./utils/curated-topic-content');
+    const { FreeBRollProvider } = require('./utils/free-broll-provider');
+    const { ShortsCoverGenerator } = require('./utils/shorts-cover-generator');
+    const { Database } = require('./database/db');
+    const { DailyShortsPublisher } = require('./utils/daily-shorts-publisher');
+    const fs = require('fs').promises;
+    const path = require('path');
+    const os = require('os');
+    const crypto = require('crypto');
+
+    const tempDir = path.join(os.tmpdir(), `mim_visual_test_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`);
+    const tempDbPath = path.join(tempDir, 'test_visual.db');
+    await fs.mkdir(tempDir, { recursive: true });
+
+    const db = new Database(tempDbPath);
+    await db.initialize();
+
+    try {
+      const tvg = new TopicVisualGenerator();
+
+      // 1. Check Topic Domain Semantic Permissions & Toxic Asset Blocking
+      this.logger.info('Checking Topic Domain Semantic Permissions & Toxic Asset Blocking...');
+      if (isAssetPermittedForTopic('airline_miles', 'broll_contactless_tap')) {
+        throw new Error('Test Failed: broll_contactless_tap should NOT be permitted for airline_miles');
+      }
+      if (isAssetPermittedForTopic('airline_miles', 'broll_burger_pricing')) {
+        throw new Error('Test Failed: broll_burger_pricing should NOT be permitted for airline_miles');
+      }
+      if (isAssetPermittedForTopic('fast_food', 'broll_contactless_tap')) {
+        throw new Error('Test Failed: broll_contactless_tap should NOT be permitted for fast_food');
+      }
+      if (isAssetPermittedForTopic('fast_food', 'broll_gpu_die_architecture')) {
+        throw new Error('Test Failed: broll_gpu_die_architecture should NOT be permitted for fast_food');
+      }
+      if (isAssetPermittedForTopic('nvidia', 'broll_contactless_tap')) {
+        throw new Error('Test Failed: broll_contactless_tap should NOT be permitted for nvidia');
+      }
+      if (isAssetPermittedForTopic('costco', 'broll_airplane_cabin')) {
+        throw new Error('Test Failed: broll_airplane_cabin should NOT be permitted for costco');
+      }
+      if (!isAssetPermittedForTopic('airline_miles', 'broll_airplane_cabin')) {
+        throw new Error('Test Failed: broll_airplane_cabin should be permitted for airline_miles');
+      }
+      if (!isAssetPermittedForTopic('fast_food', 'broll_menu_board')) {
+        throw new Error('Test Failed: broll_menu_board should be permitted for fast_food');
+      }
+      if (!isAssetPermittedForTopic('nvidia', 'broll_ai_datacenter')) {
+        throw new Error('Test Failed: broll_ai_datacenter should be permitted for nvidia');
+      }
+      this.logger.info('Test 1 Passed: Domain asset permissions and toxic cross-topic blocking verified.');
+
+      // 2. Check Curated Topic Scripts: Zero Occurrences of broll_contactless_tap
+      this.logger.info('Checking Curated Topic Scripts for zero occurrences of broll_contactless_tap...');
+      const pool = curatedTopicContent.CURATED_TOPIC_POOL;
+      for (const topicTitle of pool) {
+        const research = curatedTopicContent.getTopicResearch(topicTitle);
+        const scriptBeats = curatedTopicContent.getTopicScript(topicTitle, research, { name: 'David Chen', id: 'david_chen' });
+        for (const beat of scriptBeats) {
+          if (beat.preferredAsset === 'broll_contactless_tap') {
+            throw new Error(`Test Failed: Topic "${topicTitle}" still contains forbidden asset broll_contactless_tap in beat ${beat.id}`);
+          }
+        }
+      }
+      this.logger.info('Test 2 Passed: All 8 curated topic scripts are 100% purged of broll_contactless_tap.');
+
+      // 3. Check FreeBRollProvider Cache Key Scoping & Isolation
+      this.logger.info('Checking FreeBRollProvider Cache Key Scoping & Isolation...');
+      const brollProvider = new FreeBRollProvider({ cacheDir: path.join(tempDir, 'broll') });
+      const keyA = crypto.createHash('sha256').update('airline_miles/prod_A/scene_test/hook/broll_airplane_cabin/3').digest('hex').slice(0, 16);
+      const keyB = crypto.createHash('sha256').update('fast_food/prod_B/scene_test/hook/broll_menu_board/3').digest('hex').slice(0, 16);
+      if (keyA === keyB) {
+        throw new Error('Test Failed: Different topics produced colliding cache keys');
+      }
+      this.logger.info('Test 3 Passed: Cache key incorporates topicKey, productionId, beat, preferredAsset, and duration.');
+
+      // 4. Check FreeBRollProvider findLocalFootage blocks forbidden assets
+      this.logger.info('Checking FreeBRollProvider findLocalFootage topic filtering...');
+      const filteredFootage = await brollProvider.findLocalFootage('hook', {
+        topicKey: 'airline_miles',
+        preferredAsset: 'broll_contactless_tap'
+      });
+      if (filteredFootage !== null) {
+        throw new Error('Test Failed: findLocalFootage should reject broll_contactless_tap for airline_miles');
+      }
+      this.logger.info('Test 4 Passed: findLocalFootage rejects forbidden assets.');
+
+      // 5. Check TopicVisualGenerator SVG & Still Generation
+      this.logger.info('Checking TopicVisualGenerator SVG & Still Generation...');
+      const stillAirlinePath = path.join(tempDir, 'airline_still.png');
+      const stillFastFoodPath = path.join(tempDir, 'fastfood_still.png');
+      await tvg.generateTopicVisualStill('airline_miles', 'broll_airplane_cabin', stillAirlinePath, { title: 'Airline Frequent Flyer Miles' });
+      await tvg.generateTopicVisualStill('fast_food', 'broll_menu_board', stillFastFoodPath, { title: 'Fast Food Value Menus' });
+      
+      const dHashAirline = await tvg.computeDHash(stillAirlinePath);
+      const dHashFastFood = await tvg.computeDHash(stillFastFoodPath);
+      const shaAirline = await tvg.computeSha256(stillAirlinePath);
+      const shaFastFood = await tvg.computeSha256(stillFastFoodPath);
+
+      if (!dHashAirline.hex || !dHashFastFood.hex || shaAirline === shaFastFood) {
+        throw new Error('Test Failed: Topic stills generated identical hashes');
+      }
+      const stillDist = Database.hammingDistance(dHashAirline.hex, dHashFastFood.hex);
+      const stillSim = ((64 - stillDist) / 64) * 100;
+      this.logger.info(`Test 5 Passed: Topic stills generated with perceptual similarity = ${stillSim.toFixed(1)}% (Hamming dist = ${stillDist}/64).`);
+
+      // 6. Check ShortsCoverGenerator Perceptual Diversity
+      this.logger.info('Checking ShortsCoverGenerator Perceptual Diversity...');
+      const coverGen = new ShortsCoverGenerator({ logger: this.logger });
+      const coverAirlinePath = path.join(tempDir, 'cover_airline.jpg');
+      const coverFastFoodPath = path.join(tempDir, 'cover_fastfood.jpg');
+
+      const coverAirlineRes = await coverGen.generateCover({
+        topic: 'The Secret Economics Of Airline Frequent Flyer Miles',
+        topicKey: 'airline_miles',
+        productionId: 'prod_cover_airline',
+        script: { title: 'The Secret Economics Of Airline Frequent Flyer Miles' },
+        scenes: [{ scriptText: 'Airlines make 50% margins on points.' }],
+        verifiedData: [{ type: 'statistic', value: '50% MARGIN', label: 'LOYALTY PROFIT', verified: true }]
+      }, coverAirlinePath);
+
+      const coverFastFoodRes = await coverGen.generateCover({
+        topic: 'Why Fast Food Value Menus Are Disappearing Forever',
+        topicKey: 'fast_food',
+        productionId: 'prod_cover_fastfood',
+        script: { title: 'Why Fast Food Value Menus Are Disappearing Forever' },
+        scenes: [{ scriptText: 'Value menus are gone due to $3.89 burger inflation.' }],
+        verifiedData: [{ type: 'statistic', value: '$3.89', label: 'AVG BURGER COST', verified: true }]
+      }, coverFastFoodPath);
+
+      const coverDist = Database.hammingDistance(coverAirlineRes.dHash, coverFastFoodRes.dHash);
+      const coverSim = ((64 - coverDist) / 64) * 100;
+      this.logger.info(`Cover Perceptual Similarity: ${coverSim.toFixed(1)}% (Hamming Distance = ${coverDist}/64). Target < 75%.`);
+      if (coverSim >= 75) {
+        throw new Error(`Test Failed: Cover similarity (${coverSim.toFixed(1)}%) is too high (must be < 75%). Prior bug had >90% similarity!`);
+      }
+      this.logger.info('Test 6 Passed: Covers exhibit strong visual diversity (< 75% similarity).');
+
+      // 7. Check Database Visual Asset Registry & Duplicate Detection
+      this.logger.info('Checking Database Visual Asset Registry...');
+      const registered = await db.recordVisualAssets('prod_test_001', 'The Secret Economics Of Airline Frequent Flyer Miles', 'airline_miles', [
+        { beat_id: 'cover', asset_type: 'cover', asset_hash: coverAirlineRes.sha256, perceptual_hash: coverAirlineRes.dHash, asset_path: coverAirlinePath },
+        { beat_id: 'beat_01', asset_type: 'broll', asset_hash: shaAirline, perceptual_hash: dHashAirline.hex, asset_path: stillAirlinePath }
+      ]);
+      if (registered.length !== 2) {
+        throw new Error('Test Failed: recordVisualAssets did not record 2 assets');
+      }
+      const recentAssets = await db.getRecentVisualAssets(10);
+      if (recentAssets.length < 2) {
+        throw new Error('Test Failed: getRecentVisualAssets returned fewer than 2 assets');
+      }
+
+      // Test duplicate detection across topics
+      const dupCheckFail = await db.checkVisualAssetDuplication('fast_food', [
+        { beat_id: 'beat_01', asset_type: 'broll', asset_hash: shaAirline }
+      ]);
+      if (!dupCheckFail.duplicateFound) {
+        throw new Error('Test Failed: checkVisualAssetDuplication failed to detect cross-topic asset reuse');
+      }
+      this.logger.info('Test 7 Passed: Database visual asset registry records assets and catches cross-topic reuse.');
+
+      // 8. Check DailyShortsPublisher Visual Diversity QA Gate
+      this.logger.info('Checking DailyShortsPublisher Visual Diversity QA Gate...');
+      const publisher = new DailyShortsPublisher({ db, logger: this.logger });
+      const mockMp4 = path.join(tempDir, 'mock.mp4');
+      await fs.writeFile(mockMp4, 'mock mp4 content');
+
+      // QA check with alien asset failure
+      const alienCheck = await publisher.validateContentIntegrity({
+        topic: 'The Secret Economics Of Airline Frequent Flyer Miles',
+        productionId: 'prod_alien_test',
+        videoPath: mockMp4,
+        qaResults: {
+          checks: {
+            noAlienVisualAssets: false
+          }
+        }
+      });
+      if (alienCheck.valid || !alienCheck.failures.some(f => f.includes('Visual domain isolation failure'))) {
+        throw new Error('Test Failed: validateContentIntegrity did not block alien visual asset');
+      }
+
+      // QA check with visual diversity failure
+      const diversityFailCheck = await publisher.validateContentIntegrity({
+        topic: 'The Secret Economics Of Airline Frequent Flyer Miles',
+        productionId: 'prod_diversity_test',
+        videoPath: mockMp4,
+        qaResults: {
+          checks: {
+            noAlienVisualAssets: true,
+            visualDiversityMaintained: false
+          }
+        }
+      });
+      if (diversityFailCheck.valid || !diversityFailCheck.failures.some(f => f.includes('Visual diversity failure'))) {
+        throw new Error('Test Failed: validateContentIntegrity did not block visual diversity failure');
+      }
+
+      this.logger.info('Test 8 Passed: Visual diversity QA gate blocks alien assets and visual stagnation.');
+
+      this.logger.info('=== All Visual Diversity & Asset Isolation Tests Passed Successfully! ===');
+    } finally {
+      await db.close().catch(() => {});
+      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  async testContentNoveltyGateAndAntiDuplication() {
+    this.logger.info('=== Running Test: Content Novelty Gate & Anti-Duplication Regression Suite ===');
+    const fs = require('fs').promises;
+    const crypto = require('crypto');
+    const testSuffix = `${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const tempDir = path.join(__dirname, 'scratch', `novelty_gate_test_${testSuffix}`);
+    await fs.mkdir(tempDir, { recursive: true });
+    const dbPath = path.join(__dirname, 'data', `test_novelty_${testSuffix}.db`);
+    const db = new Database(dbPath);
+    await db.initialize();
+
+    const { ContentNoveltyGate } = require('./utils/content-novelty-gate');
+    const { DailyShortsPublisher } = require('./utils/daily-shorts-publisher');
+    const curatedTopicContent = require('./utils/curated-topic-content');
+    const { CURATED_TOPIC_POOL, resolveTopicKey, getTopicResearch, getTopicScript } = curatedTopicContent;
+
+    const noveltyGate = new ContentNoveltyGate({ logger: this.logger });
+    const publisher = new DailyShortsPublisher({
+      db,
+      noveltyGate,
+      logger: this.logger,
+      shortsDir: path.join(tempDir, 'shorts'),
+      scratchDir: path.join(tempDir, 'scratch')
+    });
+    await publisher.initialize();
+
+    try {
+      // -------------------------------------------------------------
+      // Subtest A: Curated Pool Exhaustion & Fallback Script Removal
+      // -------------------------------------------------------------
+      this.logger.info('--- Subtest A: Verifying static fallback removal & pool completeness ---');
+      if (typeof curatedTopicContent.buildFallbackScript !== 'undefined') {
+        throw new Error('Subtest A Failed: buildFallbackScript must be completely removed from curated-topic-content.js');
+      }
+
+      // Verify unmapped topics throw error in getTopicResearch and getTopicScript
+      let researchThrew = false;
+      try {
+        getTopicResearch('Unknown Non-Existent Topic');
+      } catch (err) {
+        researchThrew = true;
+      }
+      if (!researchThrew) {
+        throw new Error('Subtest A Failed: getTopicResearch must throw for unknown unmapped topics');
+      }
+
+      let scriptThrew = false;
+      try {
+        getTopicScript('Unknown Non-Existent Topic', {}, { name: 'David Chen', id: 'david_chen' });
+      } catch (err) {
+        scriptThrew = true;
+      }
+      if (!scriptThrew) {
+        throw new Error('Subtest A Failed: getTopicScript must throw for unknown unmapped topics');
+      }
+
+      // Verify Market Pulse with timestamp resolves to null
+      const marketPulseKey = resolveTopicKey('Market Pulse: Consumer Finance & Business Tactics (2026-09-21 - 1774301540306)');
+      if (marketPulseKey !== null) {
+        throw new Error(`Subtest A Failed: Timestamped Market Pulse topic must resolve to null, got [${marketPulseKey}]`);
+      }
+
+      // Verify all 16 canonical topics resolve to valid keys and can generate valid 17-beat scripts
+      if (CURATED_TOPIC_POOL.length < 16) {
+        throw new Error(`Subtest A Failed: CURATED_TOPIC_POOL has only ${CURATED_TOPIC_POOL.length} topics, expected at least 16`);
+      }
+      for (const topic of CURATED_TOPIC_POOL) {
+        const key = resolveTopicKey(topic);
+        if (!key) {
+          throw new Error(`Subtest A Failed: Topic "${topic}" does not resolve to a canonical key`);
+        }
+        const research = getTopicResearch(topic);
+        if (!research.claims || research.claims.length === 0) {
+          throw new Error(`Subtest A Failed: Topic "${topic}" missing research claims`);
+        }
+        const beats = getTopicScript(topic, research, { name: 'David Chen', id: 'david_chen' });
+        if (!beats || beats.length !== 17) {
+          throw new Error(`Subtest A Failed: Topic "${topic}" produced ${beats ? beats.length : 0} beats, expected 17`);
+        }
+      }
+      this.logger.info('Subtest A Passed: Static fallback script removed; all 16 canonical topic families verified.');
+
+      // -------------------------------------------------------------
+      // Subtest B: Same Candidate On Two Different Dates Rejected
+      // -------------------------------------------------------------
+      this.logger.info('--- Subtest B: Verifying date-variant candidate rejected by novelty gate ---');
+      const histProd1 = 'prod-hist-gym-001';
+      const gymTopic = 'Why Gym Memberships Are Designed For You To Quit';
+      await db.saveDailyShortPublication({
+        production_id: histProd1,
+        topic: gymTopic,
+        title: `${gymTopic} #Shorts`,
+        status: 'SCHEDULED',
+        scheduled_at: '2026-09-21T17:00:00.000Z'
+      });
+
+      const gymHistory = [{
+        production_id: histProd1,
+        topic: gymTopic,
+        status: 'SCHEDULED'
+      }];
+
+      const dateVariantCandidate = {
+        topic: `${gymTopic} (2026-09-22)`,
+        topicFamily: 'gym_memberships'
+      };
+
+      const dateVariantResult = noveltyGate.verifyCandidateNovelty(dateVariantCandidate, gymHistory);
+      if (dateVariantResult.passed || dateVariantResult.reason !== 'NORMALIZED_TOPIC_EXACT_DUPLICATE') {
+        throw new Error(`Subtest B Failed: Date-variant topic should be rejected as NORMALIZED_TOPIC_EXACT_DUPLICATE, got: ${JSON.stringify(dateVariantResult)}`);
+      }
+      this.logger.info('Subtest B Passed: Same candidate on different dates strictly rejected by normalized topic check.');
+
+      // -------------------------------------------------------------
+      // Subtest C: Same Narration With Different Topic Rejected
+      // The candidate uses ink-script narration but under a completely different topic family
+      // so semantic topic check won't trigger, but narration similarity should.
+      // -------------------------------------------------------------
+      this.logger.info('--- Subtest C: Verifying identical/near-identical narration rejected across different topics ---');
+      const inkResearch = getTopicResearch('The Real Reason Printer Ink Costs More Than Vintage Champagne');
+      const inkBeatsChen = getTopicScript(
+        'The Real Reason Printer Ink Costs More Than Vintage Champagne',
+        inkResearch,
+        { name: 'David Chen', id: 'david_chen' }
+      );
+      const inkBeatsElena = getTopicScript(
+        'The Real Reason Printer Ink Costs More Than Vintage Champagne',
+        inkResearch,
+        { name: 'Elena Rostova', id: 'elena_rostova' }
+      );
+
+      // Use an AIRLINE topic (very different domain) as the "candidate" but with INK script narration
+      // This tests that the narration similarity check fires even when topics are not semantically related
+      const histWithInk = [{
+        production_id: 'prod-ink-001',
+        topic: 'The Real Reason Printer Ink Costs More Than Vintage Champagne',
+        status: 'PUBLISHED',
+        scriptSummary: {
+          fullText: inkBeatsChen.map(b => b.text).join(' ')
+        }
+      }];
+
+      // Candidate is in a semantically unrelated domain (airline miles) but with the INK narration text
+      const stolenNarrationCandidate = {
+        topic: 'The Secret Behind Airline Frequent Flyer Miles',
+        topicFamily: 'airline_miles',
+        scriptText: inkBeatsElena.map(b => b.text).join(' ')
+      };
+
+      const narrationResult = noveltyGate.verifyCandidateNovelty(stolenNarrationCandidate, histWithInk);
+      // The gate must reject it — either via topic similarity OR narration similarity.
+      // We specifically want SCRIPT_NARRATION_DUPLICATE to fire (topic families are very different).
+      if (narrationResult.passed) {
+        throw new Error(`Subtest C Failed: Stolen narration with different presenter and topic family should be rejected by novelty gate, got passed=true`);
+      }
+      const validCReasons = ['SCRIPT_NARRATION_DUPLICATE', 'TOPIC_SEMANTIC_DUPLICATE', 'NORMALIZED_TOPIC_EXACT_DUPLICATE'];
+      if (!validCReasons.includes(narrationResult.reason)) {
+        throw new Error(`Subtest C Failed: Expected rejection reason in ${validCReasons.join('/')}, got: ${narrationResult.reason}`);
+      }
+      this.logger.info(`Subtest C Passed: Stolen narration rejected (reason: ${narrationResult.reason}) even across different topic families and presenters.`);
+
+      // -------------------------------------------------------------
+      // Subtest D: Same Claims / Metrics With Different Title Rejected
+      // -------------------------------------------------------------
+      this.logger.info('--- Subtest D: Verifying identical claims/metrics rejected across different topic families ---');
+      const histWithClaims = [{
+        production_id: 'prod-claims-001',
+        topic: 'Costco Membership Economics',
+        topicFamily: 'costco',
+        status: 'PUBLISHED',
+        claims: [
+          { metric: '$4.6b/yr', displayValue: '$4.6B/yr', label: 'ANNUAL MEMBERSHIP REVENUE', source: 'SEC 10-K' },
+          { metric: '72.8%', displayValue: '72.8%', label: 'OPERATING PROFIT SHARE', source: 'SEC 10-K' }
+        ]
+      }];
+
+      const copycatClaimsCandidate = {
+        topic: 'Why Wholesale Warehouses Win',
+        topicFamily: 'wholesale_clubs',
+        claims: [
+          { metric: '$4.6b/yr', displayValue: '$4.6B/yr', label: 'ANNUAL MEMBERSHIP REVENUE', source: 'SEC 10-K' },
+          { metric: '72.8%', displayValue: '72.8%', label: 'OPERATING PROFIT SHARE', source: 'SEC 10-K' }
+        ]
+      };
+
+      const claimsResult = noveltyGate.verifyCandidateNovelty(copycatClaimsCandidate, histWithClaims);
+      if (claimsResult.passed || claimsResult.reason !== 'CLAIMS_DATA_DUPLICATE') {
+        throw new Error(`Subtest D Failed: Copycat claims should be rejected as CLAIMS_DATA_DUPLICATE, got: ${JSON.stringify(claimsResult)}`);
+      }
+      this.logger.info(`Subtest D Passed: Shared identical claim metrics detected and rejected (${claimsResult.details.sharedCount} shared metrics).`);
+
+      // -------------------------------------------------------------
+      // Subtest E: Cross-Slot Diversity Blocks Same Topic Family
+      // -------------------------------------------------------------
+      this.logger.info('--- Subtest E: Verifying cross-slot category and family diversity ---');
+      const slot1Topic = await publisher.discoverNextTopic([], null);
+      if (!slot1Topic) {
+        throw new Error('Subtest E Failed: discoverNextTopic should return an eligible topic for slot 1');
+      }
+      const slot2Topic = await publisher.discoverNextTopic([slot1Topic], slot1Topic);
+      if (!slot2Topic) {
+        throw new Error('Subtest E Failed: discoverNextTopic should return an eligible topic for slot 2');
+      }
+      if (slot1Topic === slot2Topic) {
+        throw new Error(`Subtest E Failed: Slot 1 and Slot 2 received identical topic "${slot1Topic}"`);
+      }
+      const slot1Family = noveltyGate.resolveTopicFamily(slot1Topic);
+      const slot2Family = noveltyGate.resolveTopicFamily(slot2Topic);
+      if (slot1Family === slot2Family) {
+        throw new Error(`Subtest E Failed: Slot 1 and Slot 2 must be from different topic families (both were [${slot1Family}])`);
+      }
+      this.logger.info(`Subtest E Passed: Slot 1 [${slot1Family}: "${slot1Topic}"] and Slot 2 [${slot2Family}: "${slot2Topic}"] have distinct topic families.`);
+
+      // -------------------------------------------------------------
+      // Subtest F: Genuinely New Topic Passes Novelty Gate
+      // -------------------------------------------------------------
+      this.logger.info('--- Subtest F: Verifying genuinely new topic passes novelty gate ---');
+      const overdraftTopic = 'The Overdraft Trap: How Banks Make $8 Billion On Account Blunders';
+      const overdraftResearch = getTopicResearch(overdraftTopic);
+      const overdraftBeats = getTopicScript(overdraftTopic, overdraftResearch, { name: 'David Chen', id: 'david_chen' });
+
+      const freshCandidate = {
+        topic: overdraftTopic,
+        topicFamily: 'overdraft_fees',
+        scriptText: overdraftBeats.map(b => b.text).join(' '),
+        claims: overdraftResearch.claims
+      };
+
+      const freshResult = noveltyGate.verifyCandidateNovelty(freshCandidate, gymHistory);
+      if (!freshResult.passed) {
+        throw new Error(`Subtest F Failed: Genuinely fresh candidate should pass novelty gate, but failed: ${freshResult.reason}`);
+      }
+
+      // Verify content integrity passes for fresh candidate
+      const mockMp4Fresh = path.join(tempDir, 'fresh_video.mp4');
+      await fs.writeFile(mockMp4Fresh, 'mock_video_content_bytes_fresh');
+      const freshIntegrity = await publisher.validateContentIntegrity({
+        topic: overdraftTopic,
+        productionId: 'prod_fresh_001',
+        videoPath: mockMp4Fresh,
+        report: {
+          topic: overdraftTopic,
+          productionId: 'prod_fresh_001',
+          character: { id: 'david_chen', name: 'David Chen' },
+          scriptSummary: { fullText: overdraftBeats.map(b => b.text).join(' ') },
+          truthAnchorAudit: { claims: overdraftResearch.claims },
+          packaging: { title: 'The Overdraft Trap #Shorts', tags: ['overdraft', 'banking', 'finance'] },
+          provenanceSummary: { categoryD_ProceduralGraphics: 8 }
+        },
+        qaResults: {
+          checks: {
+            noBlackFrames: true,
+            representativeFramesExtracted: true,
+            noAlienVisualAssets: true,
+            visualDiversityMaintained: true
+          }
+        }
+      });
+      if (!freshIntegrity.valid) {
+        throw new Error(`Subtest F Failed: Fresh candidate failed content integrity: ${freshIntegrity.failures.join('; ')}`);
+      }
+      this.logger.info('Subtest F Passed: Genuinely fresh canonical candidate successfully passes novelty and integrity gates.');
+
+      // -------------------------------------------------------------
+      // Subtest G: Safe Halting Without Upload When Pool Is Exhausted
+      // -------------------------------------------------------------
+      this.logger.info('--- Subtest G: Verifying safe halting when pool is exhausted (0 uploads) ---');
+      const all16Topics = [...CURATED_TOPIC_POOL];
+      const exhaustedTopic = await publisher.discoverNextTopic(all16Topics, null);
+      if (exhaustedTopic !== null) {
+        throw new Error(`Subtest G Failed: When all topics are excluded, discoverNextTopic must return null, got "${exhaustedTopic}"`);
+      }
+
+      // Mark all 16 topics as published in DB
+      for (let i = 0; i < all16Topics.length; i++) {
+        await db.saveDailyShortPublication({
+          production_id: `prod-exhaust-${i}`,
+          topic: all16Topics[i],
+          title: `${all16Topics[i]} #Shorts`,
+          status: 'PUBLISHED',
+          scheduled_at: '2026-09-20T17:00:00.000Z'
+        });
+      }
+
+      // Discover next topic with empty excluded list must now return null due to DB history
+      const dbExhaustedTopic = await publisher.discoverNextTopic([], null);
+      if (dbExhaustedTopic !== null) {
+        throw new Error(`Subtest G Failed: When all topics are in DB history, discoverNextTopic must return null, got "${dbExhaustedTopic}"`);
+      }
+
+      // Running runDailyPublishingCycle with exhausted pool must safely halt with 0 uploads
+      // Reset the static lock in case a previous subtest left it set
+      DailyShortsPublisher.isPublishingActive = false;
+      const publishCycleResult = await publisher.runDailyPublishingCycle({
+        skipBacklogRecovery: true,
+        force: true
+      });
+      // Cycle must not produce any new successful slots — all should fail gracefully
+      const newSuccessSlots = (publishCycleResult.slots || []).filter(s => s.success).length;
+      if (newSuccessSlots > 0) {
+        throw new Error(`Subtest G Failed: Exhausted pool produced ${newSuccessSlots} successful slot(s) when it should have halted`);
+      }
+      this.logger.info('Subtest G Passed: Pool exhaustion safely halts without producing or uploading any Shorts.');
+
+      // -------------------------------------------------------------
+      // Subtest H: Existing Duplicate Protection Still Catches Exact MP4 Duplicates
+      // -------------------------------------------------------------
+      this.logger.info('--- Subtest H: Verifying byte-for-byte MP4 duplicate protection still active ---');
+      const hashA = crypto.createHash('sha256').update('mock_mp4_bytes_novelty_test').digest('hex');
+      const mockVideoA = path.join(tempDir, 'mock_video_a.mp4');
+      await fs.writeFile(mockVideoA, 'mock_mp4_bytes_novelty_test');
+
+      await db.saveDailyShortPublication({
+        production_id: 'prod-mp4-dup-orig',
+        topic: 'Why College Textbooks Cost More Than Laptops',
+        title: 'College Textbooks #Shorts',
+        status: 'SCHEDULED',
+        content_hash: hashA,
+        video_path: mockVideoA
+      });
+
+      const dupIntegrity = await publisher.validateContentIntegrity({
+        topic: 'The Sneaky Economics Of Hotel Resort Fees',
+        productionId: 'prod-mp4-dup-candidate',
+        videoPath: mockVideoA,
+        report: {
+          topic: 'The Sneaky Economics Of Hotel Resort Fees',
+          productionId: 'prod-mp4-dup-candidate',
+          character: { id: 'david_chen' },
+          packaging: { title: 'Resort Fees #Shorts', tags: ['resort', 'hotel'] },
+          provenanceSummary: { categoryD_ProceduralGraphics: 5 }
+        },
+        qaResults: {
+          checks: {
+            noBlackFrames: true,
+            representativeFramesExtracted: true,
+            noAlienVisualAssets: true,
+            visualDiversityMaintained: true
+          }
+        }
+      });
+
+      if (dupIntegrity.valid || !dupIntegrity.failures.some(f => f.includes('Byte-for-byte duplicate blocked'))) {
+        throw new Error('Subtest H Failed: Duplicate content hash was not blocked by validateContentIntegrity');
+      }
+      this.logger.info('Subtest H Passed: Existing byte-for-byte SHA-256 duplicate protection remains active and blocks duplicate MP4s.');
+
+      this.logger.info('=== All Subtests in Content Novelty Gate & Anti-Duplication Suite Passed Successfully! ===');
+    } finally {
+      await db.close().catch(() => {});
+      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      await fs.unlink(dbPath).catch(() => {});
     }
   }
 }

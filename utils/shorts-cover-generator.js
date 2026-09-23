@@ -35,6 +35,9 @@ function wrapLines(text, maxCharsPerLine = 16) {
   return lines.slice(0, 3); // Max 3 lines for punchy mobile readability
 }
 
+const { TopicVisualGenerator } = require('./topic-visual-generator');
+const { resolveTopicKey } = require('./curated-topic-content');
+
 /**
  * ShortsCoverGenerator
  * Creates high-impact, mobile-optimized 9:16 portrait cover thumbnails
@@ -45,6 +48,7 @@ class ShortsCoverGenerator {
     this.logger = options.logger || new Logger('ShortsCoverGenerator');
     this.width = Number(options.width || 1080);
     this.height = Number(options.height || 1920);
+    this.topicVisualGenerator = options.topicVisualGenerator || new TopicVisualGenerator({ logger: this.logger });
   }
 
   /**
@@ -139,12 +143,15 @@ class ShortsCoverGenerator {
   /**
    * Generates a 9:16 portrait cover thumbnail file.
    */
-  async generateCover(production = {}, outputPath, _options = {}) {
+  async generateCover(production = {}, outputPath, options = {}) {
     const width = this.width;
     const height = this.height;
     const scenes = production.scenes || [];
     const script = production.script || {};
     const verifiedData = production.verifiedData || script.verifiedData || [];
+
+    const rawTopic = production.topic || production.topicKey || script.title || script.topic || options.topic || options.topicKey || '';
+    const topicKey = production.topicKey || options.topicKey || resolveTopicKey(rawTopic) || 'market_pulse';
 
     const hookScene = this.selectHookScene(scenes, script);
     const { headline, heroMetric, sourceAsset } = this.extractCoverElements(hookScene, script, verifiedData, scenes);
@@ -166,15 +173,19 @@ class ShortsCoverGenerator {
       safeZones,
       headline,
       heroMetric,
-      brandTitle: 'MONEY IN MINUTES'
+      brandTitle: 'MONEY IN MINUTES',
+      topicKey
     });
 
     try {
       let basePipeline;
 
-      // Use source visual asset if available and valid
+      // Check if source visual asset is available, valid, and not a presenter portrait or foreign domain asset
       let hasSourceImage = false;
-      if (sourceAsset) {
+      const isPresenterAsset = sourceAsset && (sourceAsset.includes('presenter') || sourceAsset.includes('david_chen') || sourceAsset.includes('elena_rostova'));
+      const isPermittedAsset = sourceAsset && !isPresenterAsset && this.topicVisualGenerator.isAssetPermittedForTopic(topicKey, path.basename(sourceAsset));
+
+      if (isPermittedAsset) {
         try {
           await fs.access(sourceAsset);
           basePipeline = sharp(sourceAsset)
@@ -188,15 +199,17 @@ class ShortsCoverGenerator {
       }
 
       if (!hasSourceImage) {
-        // High quality dark luxury gradient backdrop
-        basePipeline = sharp({
-          create: {
-            width,
-            height,
-            channels: 4,
-            background: { r: 10, g: 15, b: 29, alpha: 1 } // #0a0f1d
-          }
+        // High quality topic-specific hero visual still via TopicVisualGenerator
+        const topicSvg = this.topicVisualGenerator.renderTopicVisualSvg(topicKey, 'cover', {
+          title: script.title || rawTopic,
+          metric: heroMetric?.value
         });
+        const topicBuffer = await sharp(Buffer.from(topicSvg))
+          .resize(width, height)
+          .modulate({ brightness: 0.88, saturation: 1.12 })
+          .toBuffer();
+
+        basePipeline = sharp(topicBuffer);
       }
 
       // Composite SVG text and graphic card onto base
@@ -212,7 +225,9 @@ class ShortsCoverGenerator {
         .toFile(outputPath);
 
       const stats = await fs.stat(outputPath);
-      this.logger.info(`Shorts cover generated successfully at ${outputPath} (${stats.size} bytes)`);
+      const dHash = await this.topicVisualGenerator.computeDHash(outputPath);
+      const sha256 = await this.topicVisualGenerator.computeSha256(outputPath);
+      this.logger.info(`Shorts cover generated successfully at ${outputPath} (${stats.size} bytes, dHash: ${dHash.hex})`);
 
       return {
         path: outputPath,
@@ -220,7 +235,11 @@ class ShortsCoverGenerator {
         height,
         headline,
         heroMetric: heroMetric?.value || null,
-        fileSize: stats.size
+        fileSize: stats.size,
+        dHash: dHash.hex,
+        dHashBinary: dHash.binary,
+        sha256,
+        topicKey
       };
     } catch (error) {
       this.logger.error(`Cover generation via sharp failed: ${error.message}; writing pure SVG fallback`);
@@ -232,7 +251,8 @@ class ShortsCoverGenerator {
         height,
         headline,
         heroMetric: heroMetric?.value || null,
-        isFallback: true
+        isFallback: true,
+        topicKey
       };
     }
   }
@@ -240,9 +260,94 @@ class ShortsCoverGenerator {
   /**
    * Renders the complete vector cover SVG with typography and visual badges.
    */
-  renderCoverSvg({ width, height, safeZones, headline, heroMetric, brandTitle }) {
+  renderCoverSvg({ width, height, safeZones, headline, heroMetric, _brandTitle = 'MONEY IN MINUTES', topicKey = 'market_pulse' }) {
     const lines = wrapLines(headline, 14);
     const heroBoxWidth = width - safeZones.left - safeZones.right;
+
+    const DOMAIN_STYLES = {
+      airline_miles: {
+        accent: '#38bdf8',
+        secondary: '#f59e0b',
+        tag: '✈️ AIRLINE MILES AUDIT',
+        cardBg: '#041d3d',
+        statBg: '#06254f',
+        statWidthOffset: 40,
+        badgeOffset: 0
+      },
+      fast_food: {
+        accent: '#f59e0b',
+        secondary: '#ef4444',
+        tag: '🍔 FAST FOOD AUDIT',
+        cardBg: '#2d0a02',
+        statBg: '#3d0e04',
+        statWidthOffset: 100,
+        badgeOffset: 60
+      },
+      nvidia: {
+        accent: '#10b981',
+        secondary: '#38bdf8',
+        tag: '⚡ AI COMPUTE AUDIT',
+        cardBg: '#022410',
+        statBg: '#043819',
+        statWidthOffset: 30,
+        badgeOffset: 0
+      },
+      costco: {
+        accent: '#0284c7',
+        secondary: '#f59e0b',
+        tag: '🛒 COSTCO MOAT',
+        cardBg: '#021e3d',
+        statBg: '#062d59',
+        statWidthOffset: 70,
+        badgeOffset: 40
+      },
+      swipe_fees: {
+        accent: '#8b5cf6',
+        secondary: '#38bdf8',
+        tag: '💳 PAYMENT TOLL',
+        cardBg: '#1e103c',
+        statBg: '#2d1859',
+        statWidthOffset: 50,
+        badgeOffset: 0
+      },
+      disney: {
+        accent: '#ec4899',
+        secondary: '#f59e0b',
+        tag: '🏰 DISNEY EXPERIENCES',
+        cardBg: '#340620',
+        statBg: '#4d0a30',
+        statWidthOffset: 80,
+        badgeOffset: 50
+      },
+      streaming: {
+        accent: '#ef4444',
+        secondary: '#f97316',
+        tag: '📺 SUBSCRIPTION AUDIT',
+        cardBg: '#2e0707',
+        statBg: '#420b0b',
+        statWidthOffset: 40,
+        badgeOffset: 0
+      },
+      apple: {
+        accent: '#38bdf8',
+        secondary: '#cbd5e1',
+        tag: '📱 SMARTPHONE MOAT',
+        cardBg: '#0f172a',
+        statBg: '#1e293b',
+        statWidthOffset: 60,
+        badgeOffset: 30
+      },
+      market_pulse: {
+        accent: '#0ea5e9',
+        secondary: '#10b981',
+        tag: '📊 MARKET TRUTHS',
+        cardBg: '#081e28',
+        statBg: '#0c2e3d',
+        statWidthOffset: 40,
+        badgeOffset: 0
+      }
+    };
+    const style = DOMAIN_STYLES[topicKey] || DOMAIN_STYLES.market_pulse;
 
     // Line spacing
     const headlineFontSize = lines.length === 1 ? 92 : lines.length === 2 ? 80 : 68;
@@ -257,21 +362,19 @@ class ShortsCoverGenerator {
     const availableHeight = (height - safeZones.bottom) - safeZones.top;
     const heroBoxY = Math.max(safeZones.top + 30, Math.round(safeZones.top + (availableHeight - totalBlockHeight) / 2));
     const metricBoxY = heroBoxY + headlineBoxHeight + blockGap;
+    const statPillWidth = heroBoxWidth - (style.statWidthOffset || 0);
 
     let metricHtml = '';
     if (hasMetric) {
-      const isPositive = heroMetric.type === 'growth' || String(heroMetric.value).startsWith('+');
-      const accentColor = isPositive ? '#10b981' : '#38bdf8';
-
       metricHtml = `
         <!-- Hero Stat Pill -->
         <g transform="translate(${safeZones.left}, ${metricBoxY})">
-          <rect width="${heroBoxWidth}" height="190" rx="24" fill="#0f172a" fill-opacity="0.94" stroke="${accentColor}" stroke-width="3" filter="url(#glow)" />
+          <rect width="${statPillWidth}" height="190" rx="24" fill="${style.statBg}" fill-opacity="0.85" stroke="${style.secondary}" stroke-width="3" filter="url(#glow)" />
           <text x="32" y="52" fill="#94a3b8" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="bold" letter-spacing="3">${escapeXml(heroMetric.label.toUpperCase())}</text>
-          <text x="32" y="142" fill="${accentColor}" font-family="Arial, Helvetica, sans-serif" font-size="82" font-weight="900">${escapeXml(heroMetric.value)}</text>
-          <g transform="translate(${heroBoxWidth - 190}, 50)">
-            <rect width="150" height="42" rx="21" fill="${accentColor}" fill-opacity="0.2" stroke="${accentColor}" stroke-width="1.5" />
-            <text x="75" y="28" fill="${accentColor}" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="bold" text-anchor="middle">✓ VERIFIED</text>
+          <text x="32" y="142" fill="${style.secondary}" font-family="Arial, Helvetica, sans-serif" font-size="82" font-weight="900">${escapeXml(heroMetric.value)}</text>
+          <g transform="translate(${statPillWidth - 190}, 50)">
+            <rect width="150" height="42" rx="21" fill="${style.secondary}" fill-opacity="0.25" stroke="${style.secondary}" stroke-width="1.5" />
+            <text x="75" y="28" fill="${style.secondary}" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="bold" text-anchor="middle">✓ VERIFIED</text>
           </g>
         </g>
       `;
@@ -280,11 +383,6 @@ class ShortsCoverGenerator {
     return `
       <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
         <defs>
-          <linearGradient id="bgGrad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stop-color="#020617" stop-opacity="0.8" />
-            <stop offset="50%" stop-color="#0f172a" stop-opacity="0.5" />
-            <stop offset="100%" stop-color="#020617" stop-opacity="0.95" />
-          </linearGradient>
           <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
             <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.8" />
           </filter>
@@ -294,18 +392,15 @@ class ShortsCoverGenerator {
           </filter>
         </defs>
 
-        <!-- Dark Contrast Backdrop -->
-        <rect width="${width}" height="${height}" fill="url(#bgGrad)" />
-
-        <!-- Brand Ribbon at Top Safe Zone -->
-        <g transform="translate(${safeZones.left}, ${safeZones.top - 50})">
-          <rect width="280" height="46" rx="23" fill="#38bdf8" fill-opacity="0.18" stroke="#38bdf8" stroke-width="1.5" />
-          <text x="140" y="30" fill="#38bdf8" font-family="Arial, Helvetica, sans-serif" font-size="20" font-weight="900" letter-spacing="2" text-anchor="middle">⚡ ${escapeXml(brandTitle)}</text>
+        <!-- Domain Badge at Top Safe Zone -->
+        <g transform="translate(${safeZones.left + (style.badgeOffset || 0)}, ${safeZones.top - 50})">
+          <rect width="320" height="46" rx="23" fill="${style.accent}" fill-opacity="0.25" stroke="${style.accent}" stroke-width="1.5" />
+          <text x="160" y="30" fill="${style.accent}" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="900" letter-spacing="2" text-anchor="middle">${escapeXml(style.tag)}</text>
         </g>
 
         <!-- Headline Box -->
         <g transform="translate(${safeZones.left}, ${heroBoxY})">
-          <rect width="${heroBoxWidth}" height="${lines.length * lineHeight + 60}" rx="28" fill="#000000" fill-opacity="0.75" stroke="#334155" stroke-width="2" filter="url(#shadow)" />
+          <rect width="${heroBoxWidth}" height="${lines.length * lineHeight + 60}" rx="28" fill="${style.cardBg}" fill-opacity="0.75" stroke="${style.accent}" stroke-width="2.5" filter="url(#shadow)" />
           ${lines.map((line, idx) => `
             <text x="36" y="${70 + idx * lineHeight}" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="${headlineFontSize}" font-weight="900" letter-spacing="1">
               ${escapeXml(line)}
@@ -317,8 +412,8 @@ class ShortsCoverGenerator {
 
         <!-- Bottom Safe Zone Indicator / Hook Accent -->
         <g transform="translate(${safeZones.left}, ${height - safeZones.bottom + 20})">
-          <rect width="220" height="40" rx="20" fill="#f59e0b" fill-opacity="0.2" stroke="#f59e0b" stroke-width="1.5" />
-          <text x="110" y="26" fill="#f59e0b" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="bold" text-anchor="middle">WATCH IN 60 SECONDS</text>
+          <rect width="240" height="40" rx="20" fill="${style.secondary}" fill-opacity="0.25" stroke="${style.secondary}" stroke-width="1.5" />
+          <text x="120" y="26" fill="${style.secondary}" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="bold" text-anchor="middle">WATCH IN 60 SECONDS</text>
         </g>
       </svg>
     `.trim();
